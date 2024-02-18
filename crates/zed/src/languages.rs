@@ -26,6 +26,7 @@ mod json;
 #[cfg(feature = "plugin_runtime")]
 mod language_plugin;
 mod lua;
+mod navi;
 mod nu;
 mod ocaml;
 mod php;
@@ -94,6 +95,7 @@ pub fn init(
         ("json", tree_sitter_json::language()),
         ("lua", tree_sitter_lua::language()),
         ("markdown", tree_sitter_markdown::language()),
+        ("navi", tree_sitter_navi::language()),
         ("nix", tree_sitter_nix::language()),
         ("nu", tree_sitter_nu::language()),
         ("ocaml", tree_sitter_ocaml::language_ocaml()),
@@ -319,6 +321,7 @@ pub fn init(
             node_runtime.clone(),
         ))],
     );
+    language("navi", vec![Arc::new(navi::NaviLspAdapter)]);
 }
 
 #[cfg(any(test, feature = "test-support"))]

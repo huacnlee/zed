@@ -154,6 +154,7 @@ tree-sitter-vue.workspace = true
 tree-sitter-yaml.workspace = true
 tree-sitter-zig.workspace = true
 tree-sitter.workspace = true
+tree-sitter-navi.workspace = true
 url.workspace = true
 urlencoding = "2.1.2"
 util.workspace = true
