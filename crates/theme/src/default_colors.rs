@@ -105,6 +105,8 @@ impl ThemeColors {
             terminal_ansi_dim_cyan: cyan().light().step_10(),
             terminal_ansi_dim_white: neutral().light().step_11(),
             link_text_hover: orange().light().step_10(),
+            tooltip_background: black().light_alpha().step_9(),
+            tooltip_foreground: white().light().step_12(),
         }
     }
 
@@ -199,6 +201,8 @@ impl ThemeColors {
             terminal_ansi_bright_white: neutral().dark().step_11(),
             terminal_ansi_dim_white: neutral().dark().step_10(),
             link_text_hover: orange().dark().step_10(),
+            tooltip_background: black().dark().step_9(),
+            tooltip_foreground: white().dark().step_12(),
         }
     }
 }

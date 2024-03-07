@@ -95,9 +95,13 @@ pub fn tooltip_container<V>(
         div().pl_2().pt_2p5().child(
             v_flex()
                 .elevation_2(cx)
+                .border_0()
+                .shadow_sm()
+                .rounded_md()
                 .font(ui_font)
-                .text_ui()
-                .text_color(cx.theme().colors().text)
+                .text_ui_sm()
+                .bg(cx.theme().colors().tooltip_background)
+                .text_color(cx.theme().colors().tooltip_foreground)
                 .py_1()
                 .px_2()
                 .map(|el| f(el, cx)),

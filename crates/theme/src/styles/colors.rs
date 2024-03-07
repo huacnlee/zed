@@ -132,6 +132,8 @@ pub struct ThemeColors {
     // /// The opacity of the scrollbar status marks, like diagnostic states and git status.
     // todo()
     // pub scrollbar_status_opacity: Hsla,
+    pub tooltip_background: Hsla,
+    pub tooltip_foreground: Hsla,
 
     // ===
     // Editor

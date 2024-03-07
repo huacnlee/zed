@@ -138,6 +138,8 @@ pub(crate) fn one_dark() -> Theme {
                 scrollbar_track_border: hsla(228. / 360., 8. / 100., 25. / 100., 1.),
                 editor_foreground: hsla(218. / 360., 14. / 100., 71. / 100., 1.),
                 link_text_hover: blue,
+                tooltip_background: crate::black().dark().step_9(),
+                tooltip_foreground: crate::white().dark().step_12(),
             },
             status: StatusColors {
                 conflict: yellow,

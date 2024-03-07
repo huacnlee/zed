@@ -480,6 +480,12 @@ pub struct ThemeColorsContent {
 
     #[serde(rename = "link_text.hover")]
     pub link_text_hover: Option<String>,
+
+    #[serde(rename = "tooltip.background")]
+    pub tooltip_background: Option<String>,
+
+    #[serde(rename = "tooltip.foreground")]
+    pub tooltip_foreground: Option<String>,
 }
 
 impl ThemeColorsContent {
@@ -832,6 +838,14 @@ impl ThemeColorsContent {
                 .and_then(|color| try_parse_color(color).ok()),
             link_text_hover: self
                 .link_text_hover
+                .as_ref()
+                .and_then(|color| try_parse_color(color).ok()),
+            tooltip_background: self
+                .tooltip_background
+                .as_ref()
+                .and_then(|color| try_parse_color(color).ok()),
+            tooltip_foreground: self
+                .tooltip_foreground
                 .as_ref()
                 .and_then(|color| try_parse_color(color).ok()),
         }
