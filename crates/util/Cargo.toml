@@ -43,6 +43,8 @@ url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 tendril = "0.4.3"
+async-std = { version = "1.12.0", features = ["unstable"] }
+
 
 [dev-dependencies]
 git2.workspace = true

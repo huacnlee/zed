@@ -45,3 +45,62 @@ pub async fn extract_zip<R: AsyncRead + Unpin>(dst: &Path, reader: R) -> Result<
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use smol::io::{BufReader, Cursor};
+    use tempfile::NamedTempFile;
+
+    use super::*;
+
+    #[track_caller]
+    fn assert_file_content(path: &Path, content: &str) {
+        assert!(path.exists(), "file not found: {:?}", path);
+        let actual = std::fs::read_to_string(path).unwrap();
+        assert_eq!(actual, content);
+    }
+
+    #[test]
+    fn test_extract_gz() {
+        smol::block_on(async {
+            let data = include_bytes!("../test_data/test.gz");
+            let reader = BufReader::new(Cursor::new(data));
+            let file = NamedTempFile::new().unwrap();
+            let dst = file.path().with_extension("txt");
+            extract_gz(&dst, reader).await.unwrap();
+
+            assert_file_content(&dst, "Hello world.");
+            file.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn test_extract_tar_gz() {
+        smol::block_on(async {
+            let data = include_bytes!("../test_data/test.tar.gz");
+            let reader = BufReader::new(Cursor::new(data));
+            let dir = tempfile::tempdir().unwrap();
+            let dst = dir.path();
+            extract_tar_gz(dst, reader).await.unwrap();
+
+            assert_file_content(&dst.join("test"), "Hello world.");
+            assert_file_content(&dst.join("foo/bar.txt"), "Foo bar.");
+            dir.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn test_extract_zip() {
+        smol::block_on(async {
+            let data = include_bytes!("../test_data/test.zip");
+            let reader = BufReader::new(Cursor::new(data));
+            let dir = tempfile::tempdir().unwrap();
+            let dst = dir.path();
+            extract_zip(dst, reader).await.unwrap();
+
+            assert_file_content(&dst.join("test"), "Hello world.");
+            assert_file_content(&dst.join("foo/bar.txt"), "Foo bar.");
+            dir.close().unwrap();
+        });
+    }
+}

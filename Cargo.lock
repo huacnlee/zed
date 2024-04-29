@@ -11017,6 +11017,7 @@ dependencies = [
  "anyhow",
  "async-compression",
  "async-fs 1.6.0",
+ "async-std",
  "async-tar",
  "async_zip",
  "collections",
