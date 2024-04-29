@@ -259,6 +259,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5a26814d8dcb93b0e5a0ff3c6d80a8843bafb21b39e8e18a6f05471870e110"
 
 [[package]]
+name = "archive"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-std",
+ "async-tar",
+ "async_zip",
+ "futures 0.3.28",
+ "smol",
+ "tempfile",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2520,6 +2534,7 @@ name = "copilot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "archive",
  "async-std",
  "clock",
  "collections",
@@ -3651,6 +3666,7 @@ name = "extension"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "archive",
  "async-compression",
  "async-tar",
  "async-trait",
@@ -4081,6 +4097,7 @@ name = "fs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "archive",
  "async-compression",
  "async-tar",
  "async-trait",
@@ -5573,6 +5590,7 @@ name = "languages"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "archive",
  "async-trait",
  "collections",
  "feature_flags",
@@ -6296,6 +6314,7 @@ name = "node_runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "archive",
  "async-trait",
  "futures 0.3.28",
  "log",
@@ -11015,11 +11034,7 @@ name = "util"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
  "async-fs 1.6.0",
- "async-std",
- "async-tar",
- "async_zip",
  "collections",
  "dirs 3.0.2",
  "futures 0.3.28",
@@ -11034,7 +11049,6 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
- "smol",
  "take-until",
  "tempfile",
  "tendril",

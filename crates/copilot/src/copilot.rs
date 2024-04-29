@@ -990,7 +990,7 @@ async fn get_copilot_lsp(http: Arc<dyn HttpClient>) -> anyhow::Result<PathBuf> {
                 .await
                 .context("error downloading copilot release")?;
 
-            util::archive::extract_tar_gz(&dist_dir, response.body_mut()).await?;
+            archive::extract_tar_gz(&dist_dir, response.body_mut()).await?;
             remove_matching(&paths::COPILOT_DIR, |entry| entry != version_dir).await;
         }
 

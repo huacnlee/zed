@@ -106,7 +106,7 @@ impl LspAdapter for RustLspAdapter {
                 .get(&version.url, Default::default(), true)
                 .await
                 .map_err(|err| anyhow!("error downloading release: {}", err))?;
-            util::archive::extract_gz(&destination_path, response.body_mut()).await?;
+            archive::extract_gz(&destination_path, response.body_mut()).await?;
             // todo("windows")
             #[cfg(not(windows))]
             {

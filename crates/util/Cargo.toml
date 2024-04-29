@@ -17,10 +17,7 @@ test-support = ["tempfile", "git2"]
 
 [dependencies]
 anyhow.workspace = true
-async-compression.workspace = true
 async-fs.workspace = true
-async-tar.workspace = true
-async_zip.workspace = true
 collections.workspace = true
 dirs = "3.0"
 futures-lite.workspace = true
@@ -35,7 +32,6 @@ regex.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-smol.workspace = true
 take-until = "0.2.0"
 tempfile = { workspace = true, optional = true }
 unicase.workspace = true
@@ -43,8 +39,6 @@ url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 tendril = "0.4.3"
-async-std = { version = "1.12.0", features = ["unstable"] }
-
 
 [dev-dependencies]
 git2.workspace = true

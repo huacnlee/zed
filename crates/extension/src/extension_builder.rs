@@ -398,7 +398,7 @@ impl ExtensionBuilder {
         log::info!("downloading wasi-sdk to {}", wasi_sdk_dir.display());
         let mut response = self.http.get(&url, AsyncBody::default(), true).await?;
 
-        util::archive::extract_tar_gz(&tar_out_dir, response.body_mut())
+        archive::extract_tar_gz(&tar_out_dir, response.body_mut())
             .await
             .context("failed to unpack wasi-sdk archive")?;
 

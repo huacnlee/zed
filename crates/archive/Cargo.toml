@@ -1,0 +1,30 @@
+[package]
+name = "archive"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+doctest = true
+
+[features]
+test-support = ["tempfile"]
+
+[dependencies]
+anyhow.workspace = true
+async-compression.workspace = true
+async-tar.workspace = true
+async_zip.workspace = true
+futures.workspace = true
+smol.workspace = true
+tempfile = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+async-std = { version = "1.12.0", features = ["unstable"] }
+
+[dev-dependencies]
+tempfile.workspace = true

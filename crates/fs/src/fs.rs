@@ -177,7 +177,7 @@ impl Fs for RealFs {
         path: &Path,
         content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()> {
-        util::archive::extract_tar_gz(path, content).await?;
+        archive::extract_tar_gz(path, content).await?;
         Ok(())
     }
 
@@ -186,7 +186,7 @@ impl Fs for RealFs {
         dst: &Path,
         content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()> {
-        util::archive::extract_zip(dst, content).await?;
+        archive::extract_zip(dst, content).await?;
         Ok(())
     }
 

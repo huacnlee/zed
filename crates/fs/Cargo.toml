@@ -18,6 +18,7 @@ text.workspace = true
 util.workspace = true
 
 anyhow.workspace = true
+archive.workspace = true
 async-tar.workspace = true
 async-compression.workspace = true
 async-trait.workspace = true

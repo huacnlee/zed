@@ -1,5 +1,4 @@
 pub mod arc_cow;
-pub mod archive;
 pub mod fs;
 pub mod github;
 pub mod http;

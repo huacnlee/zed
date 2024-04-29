@@ -165,8 +165,8 @@ impl RealNodeRuntime {
 
             let body = response.body_mut();
             match ext {
-                "zip" => util::archive::extract_zip(&node_containing_dir, body).await?,
-                _ => util::archive::extract_tar_gz(&node_containing_dir, body).await?,
+                "zip" => archive::extract_zip(&node_containing_dir, body).await?,
+                _ => archive::extract_tar_gz(&node_containing_dir, body).await?,
             }
         }
 

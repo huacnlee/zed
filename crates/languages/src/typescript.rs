@@ -344,7 +344,7 @@ impl LspAdapter for EsLintLspAdapter {
                 .get(&version.url, Default::default(), true)
                 .await
                 .map_err(|err| anyhow!("error downloading release: {}", err))?;
-            util::archive::extract_tar_gz(&destination_path, response.body_mut()).await?;
+            archive::extract_tar_gz(&destination_path, response.body_mut()).await?;
 
             let mut dir = fs::read_dir(&destination_path).await?;
             let first = dir.next().await.ok_or(anyhow!("missing first file"))??;
