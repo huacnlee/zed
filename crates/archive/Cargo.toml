@@ -22,6 +22,7 @@ async_zip.workspace = true
 futures.workspace = true
 smol.workspace = true
 tempfile = { workspace = true, optional = true }
+walkdir = "2.5.0"
 
 [target.'cfg(windows)'.dependencies]
 async-std = { version = "1.12.0", features = ["unstable"] }
