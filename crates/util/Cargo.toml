@@ -17,8 +17,13 @@ test-support = ["tempfile", "git2"]
 
 [dependencies]
 anyhow.workspace = true
+async-compression.workspace = true
+async-fs.workspace = true
+async-tar.workspace = true
+async_zip.workspace = true
 collections.workspace = true
 dirs = "3.0"
+futures-lite.workspace = true
 futures.workspace = true
 git2 = { workspace = true, optional = true }
 globset.workspace = true
@@ -30,8 +35,7 @@ regex.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-async-fs.workspace = true
-futures-lite.workspace = true
+smol.workspace = true
 take-until = "0.2.0"
 tempfile = { workspace = true, optional = true }
 unicase.workspace = true

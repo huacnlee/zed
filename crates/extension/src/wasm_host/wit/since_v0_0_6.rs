@@ -2,7 +2,6 @@ use crate::wasm_host::{wit::ToWasmtimeResult, WasmState};
 use ::settings::Settings;
 use anyhow::{anyhow, bail, Result};
 use async_compression::futures::bufread::GzipDecoder;
-use async_tar::Archive;
 use async_trait::async_trait;
 use futures::{io::BufReader, FutureExt as _};
 use language::{
@@ -325,11 +324,10 @@ impl ExtensionImports for WasmState {
                         .await?;
                 }
                 DownloadedFileType::GzipTar => {
-                    let body = GzipDecoder::new(body);
                     futures::pin_mut!(body);
                     self.host
                         .fs
-                        .extract_tar_file(&destination_path, Archive::new(body))
+                        .extract_tar_gz_file(&destination_path, body)
                         .await?;
                 }
                 DownloadedFileType::Zip => {

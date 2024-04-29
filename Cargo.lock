@@ -4083,6 +4083,7 @@ name = "fs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "async-tar",
  "async-trait",
  "async_zip",
@@ -6299,9 +6300,8 @@ name = "node_runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
- "async-tar",
  "async-trait",
+ "fs",
  "futures 0.3.28",
  "log",
  "semver",
@@ -11020,7 +11020,10 @@ name = "util"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "async-fs 1.6.0",
+ "async-tar",
+ "async_zip",
  "collections",
  "dirs 3.0.2",
  "futures 0.3.28",
@@ -11035,6 +11038,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "smol",
  "take-until",
  "tempfile",
  "tendril",

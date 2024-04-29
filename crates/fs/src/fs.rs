@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use async_compression::futures::bufread::GzipDecoder;
 use futures::io::BufReader;
 
 #[cfg(unix)]
@@ -42,10 +43,10 @@ pub trait Fs: Send + Sync {
         path: &Path,
         content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()>;
-    async fn extract_tar_file(
+    async fn extract_tar_gz_file(
         &self,
         path: &Path,
-        content: Archive<Pin<&mut (dyn AsyncRead + Send)>>,
+        content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()>;
     async fn extract_zip_file(
         &self,
@@ -174,12 +175,12 @@ impl Fs for RealFs {
         Ok(())
     }
 
-    async fn extract_tar_file(
+    async fn extract_tar_gz_file(
         &self,
         path: &Path,
-        content: Archive<Pin<&mut (dyn AsyncRead + Send)>>,
+        content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()> {
-        content.unpack(path).await?;
+        util::archive::extract_tar_gz(path, content).await?;
         Ok(())
     }
 
@@ -1170,11 +1171,13 @@ impl Fs for FakeFs {
         Ok(())
     }
 
-    async fn extract_tar_file(
+    async fn extract_tar_gz_file(
         &self,
         path: &Path,
-        content: Archive<Pin<&mut (dyn AsyncRead + Send)>>,
+        content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()> {
+        let body = GzipDecoder::new(BufReader::new(content));
+        let content = Archive::new(body);
         let mut entries = content.entries()?;
         while let Some(entry) = entries.next().await {
             let mut entry = entry?;
