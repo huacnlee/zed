@@ -3,7 +3,6 @@ use anyhow::{anyhow, Result};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
-use futures::io::BufReader;
 use futures::{future::BoxFuture, AsyncRead, Stream, StreamExt};
 use git::repository::{GitRepository, RealGitRepository};
 use git2::Repository as LibGitRepository;
@@ -187,26 +186,7 @@ impl Fs for RealFs {
         dst: &Path,
         content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()> {
-        let mut reader = async_zip::base::read::stream::ZipFileReader::new(BufReader::new(content));
-
-        let dst = &dst.canonicalize().unwrap_or_else(|_| dst.to_path_buf());
-        while let Some(mut item) = reader.next_with_entry().await? {
-            let entry_reader = item.reader_mut();
-            let entry = entry_reader.entry();
-            let path = dst.join(entry.filename().as_str().unwrap());
-
-            if entry.dir().unwrap() {
-                self.create_dir(&path).await?;
-            } else {
-                let parent_dir = path.parent().expect("failed to get parent directory");
-                self.create_dir(parent_dir).await?;
-                let mut file = smol::fs::File::create(&path).await?;
-                futures::io::copy(entry_reader, &mut file).await?;
-            }
-
-            reader = item.done().await?;
-        }
-
+        util::archive::extract_zip(dst, content).await?;
         Ok(())
     }
 
@@ -1174,7 +1154,9 @@ impl Fs for FakeFs {
         path: &Path,
         content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()> {
-        let body = async_compression::futures::bufread::GzipDecoder::new(BufReader::new(content));
+        let body = async_compression::futures::bufread::GzipDecoder::new(
+            futures::io::BufReader::new(content),
+        );
         let content = async_tar::Archive::new(body);
         let mut entries = content.entries()?;
         while let Some(entry) = entries.next().await {
@@ -1195,7 +1177,8 @@ impl Fs for FakeFs {
         dst: &Path,
         content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()> {
-        let mut reader = async_zip::base::read::stream::ZipFileReader::new(BufReader::new(content));
+        let mut reader =
+            async_zip::base::read::stream::ZipFileReader::new(futures::io::BufReader::new(content));
 
         let dst = &dst.canonicalize().unwrap_or_else(|_| dst.to_path_buf());
         while let Some(mut item) = reader.next_with_entry().await? {
