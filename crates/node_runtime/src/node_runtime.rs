@@ -1,10 +1,8 @@
 use anyhow::{anyhow, bail, Context, Result};
-use async_compression::futures::bufread::GzipDecoder;
-use async_tar::Archive;
 use futures::AsyncReadExt;
 use semver::Version;
 use serde::Deserialize;
-use smol::{fs, io::BufReader, lock::Mutex, process::Command};
+use smol::{fs, lock::Mutex, process::Command};
 use std::io;
 use std::process::{Output, Stdio};
 use std::{
@@ -142,7 +140,12 @@ impl RealNodeRuntime {
                 .await
                 .context("error creating node containing dir")?;
 
-            let file_name = format!("node-{VERSION}-{os}-{arch}.tar.gz");
+            let ext = match consts::OS {
+                "windows" => "zip",
+                _ => "tar.gz",
+            };
+
+            let file_name = format!("node-{VERSION}-{os}-{arch}.{ext}");
             let url = format!("https://nodejs.org/dist/{VERSION}/{file_name}");
             let mut response = self
                 .http
@@ -150,9 +153,11 @@ impl RealNodeRuntime {
                 .await
                 .context("error downloading Node binary tarball")?;
 
-            let decompressed_bytes = GzipDecoder::new(BufReader::new(response.body_mut()));
-            let archive = Archive::new(decompressed_bytes);
-            archive.unpack(&node_containing_dir).await?;
+            let body = response.body_mut();
+            match ext {
+                "zip" => util::archive::extract_zip(&node_containing_dir, body).await?,
+                _ => util::archive::extract_tar_gz(&node_containing_dir, body).await?,
+            }
         }
 
         // Note: Not in the `if !valid {}` so we can populate these for existing installations
