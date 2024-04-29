@@ -15,6 +15,16 @@ use util::ResultExt;
 
 const VERSION: &str = "v18.15.0";
 
+#[cfg(windows)]
+const NODE_PATH: &str = "node.exe";
+#[cfg(not(windows))]
+const NODE_PATH: &str = "bin/node";
+
+#[cfg(windows)]
+const NPM_PATH: &str = "npm.cmd";
+#[cfg(not(windows))]
+const NPM_PATH: &str = "bin/npm";
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct NpmInfo {
@@ -117,8 +127,8 @@ impl RealNodeRuntime {
         let folder_name = format!("node-{VERSION}-{os}-{arch}");
         let node_containing_dir = util::paths::SUPPORT_DIR.join("node");
         let node_dir = node_containing_dir.join(folder_name);
-        let node_binary = node_dir.join("bin/node");
-        let npm_file = node_dir.join("bin/npm");
+        let node_binary = node_dir.join(NODE_PATH);
+        let npm_file = node_dir.join(NPM_PATH);
 
         let result = Command::new(&node_binary)
             .env_clear()
@@ -173,7 +183,7 @@ impl RealNodeRuntime {
 impl NodeRuntime for RealNodeRuntime {
     async fn binary_path(&self) -> Result<PathBuf> {
         let installation_path = self.install_if_needed().await?;
-        Ok(installation_path.join("bin/node"))
+        Ok(installation_path.join(NODE_PATH))
     }
 
     async fn run_npm_subcommand(
@@ -193,8 +203,8 @@ impl NodeRuntime for RealNodeRuntime {
                 }
             }
 
-            let node_binary = installation_path.join("bin/node");
-            let npm_file = installation_path.join("bin/npm");
+            let node_binary = installation_path.join(NODE_PATH);
+            let npm_file = installation_path.join(NPM_PATH);
 
             if smol::fs::metadata(&node_binary).await.is_err() {
                 return Err(anyhow!("missing node binary file"));
