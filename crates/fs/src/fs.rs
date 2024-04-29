@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use futures::io::BufReader;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -45,6 +46,11 @@ pub trait Fs: Send + Sync {
         &self,
         path: &Path,
         content: Archive<Pin<&mut (dyn AsyncRead + Send)>>,
+    ) -> Result<()>;
+    async fn extract_zip_file(
+        &self,
+        dst: &Path,
+        content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()>;
     async fn copy_file(&self, source: &Path, target: &Path, options: CopyOptions) -> Result<()>;
     async fn rename(&self, source: &Path, target: &Path, options: RenameOptions) -> Result<()>;
@@ -174,6 +180,34 @@ impl Fs for RealFs {
         content: Archive<Pin<&mut (dyn AsyncRead + Send)>>,
     ) -> Result<()> {
         content.unpack(path).await?;
+        Ok(())
+    }
+
+    async fn extract_zip_file(
+        &self,
+        dst: &Path,
+        content: Pin<&mut (dyn AsyncRead + Send)>,
+    ) -> Result<()> {
+        let mut reader = async_zip::base::read::stream::ZipFileReader::new(BufReader::new(content));
+
+        let dst = &dst.canonicalize().unwrap_or_else(|_| dst.to_path_buf());
+        while let Some(mut item) = reader.next_with_entry().await? {
+            let entry_reader = item.reader_mut();
+            let entry = entry_reader.entry();
+            let path = dst.join(entry.filename().as_str().unwrap());
+
+            if entry.dir().unwrap() {
+                self.create_dir(&path).await?;
+            } else {
+                let parent_dir = path.parent().expect("failed to get parent directory");
+                self.create_dir(parent_dir).await?;
+                let mut file = smol::fs::File::create(&path).await?;
+                futures::io::copy(entry_reader, &mut file).await?;
+            }
+
+            reader = item.done().await?;
+        }
+
         Ok(())
     }
 
@@ -1152,6 +1186,35 @@ impl Fs for FakeFs {
                 self.write_file_internal(&path, bytes)?;
             }
         }
+        Ok(())
+    }
+
+    async fn extract_zip_file(
+        &self,
+        dst: &Path,
+        content: Pin<&mut (dyn AsyncRead + Send)>,
+    ) -> Result<()> {
+        let mut reader = async_zip::base::read::stream::ZipFileReader::new(BufReader::new(content));
+
+        let dst = &dst.canonicalize().unwrap_or_else(|_| dst.to_path_buf());
+        while let Some(mut item) = reader.next_with_entry().await? {
+            let entry_reader = item.reader_mut();
+            let entry = entry_reader.entry();
+            let path = dst.join(entry.filename().as_str().unwrap());
+
+            if entry.dir().unwrap() {
+                self.create_dir(&path).await?;
+            } else {
+                let parent_dir = path.parent().expect("failed to get parent directory");
+                self.create_dir(parent_dir).await?;
+                let mut bytes = Vec::new();
+                entry_reader.read_to_end(&mut bytes).await?;
+                self.write_file_internal(&path, bytes)?;
+            }
+
+            reader = item.done().await?;
+        }
+
         Ok(())
     }
 
