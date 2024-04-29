@@ -6,6 +6,14 @@ use async_tar::Archive;
 use async_zip::base::read::stream::ZipFileReader;
 use futures::{io::BufReader, AsyncRead};
 
+pub async fn extract_gz<R: AsyncRead + Unpin>(dst: &Path, reader: R) -> Result<()> {
+    let decompressed_bytes = GzipDecoder::new(BufReader::new(reader));
+    let mut file = smol::fs::File::create(dst).await?;
+    futures::io::copy(decompressed_bytes, &mut file).await?;
+
+    Ok(())
+}
+
 pub async fn extract_tar_gz<R: AsyncRead + Unpin>(dst: &Path, reader: R) -> Result<()> {
     let decompressed_bytes = GzipDecoder::new(BufReader::new(reader));
     let archive = Archive::new(decompressed_bytes);

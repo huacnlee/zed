@@ -2,8 +2,6 @@ use crate::wasm_host::parse_wasm_extension_version;
 use crate::ExtensionManifest;
 use crate::{extension_manifest::ExtensionLibraryKind, GrammarManifestEntry};
 use anyhow::{anyhow, bail, Context as _, Result};
-use async_compression::futures::bufread::GzipDecoder;
-use async_tar::Archive;
 use futures::io::BufReader;
 use futures::AsyncReadExt;
 use serde::Deserialize;
@@ -399,10 +397,8 @@ impl ExtensionBuilder {
 
         log::info!("downloading wasi-sdk to {}", wasi_sdk_dir.display());
         let mut response = self.http.get(&url, AsyncBody::default(), true).await?;
-        let body = BufReader::new(response.body_mut());
-        let body = GzipDecoder::new(body);
-        let tar = Archive::new(body);
-        tar.unpack(&tar_out_dir)
+
+        util::archive::extract_tar_gz(&tar_out_dir, response.body_mut())
             .await
             .context("failed to unpack wasi-sdk archive")?;
 

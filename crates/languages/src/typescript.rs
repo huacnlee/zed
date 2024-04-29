@@ -1,6 +1,4 @@
 use anyhow::{anyhow, Result};
-use async_compression::futures::bufread::GzipDecoder;
-use async_tar::Archive;
 use async_trait::async_trait;
 use collections::HashMap;
 use gpui::AsyncAppContext;
@@ -10,7 +8,7 @@ use node_runtime::NodeRuntime;
 use project::project_settings::ProjectSettings;
 use serde_json::{json, Value};
 use settings::Settings;
-use smol::{fs, io::BufReader, stream::StreamExt};
+use smol::{fs, stream::StreamExt};
 use std::{
     any::Any,
     ffi::OsString,
@@ -346,9 +344,7 @@ impl LspAdapter for EsLintLspAdapter {
                 .get(&version.url, Default::default(), true)
                 .await
                 .map_err(|err| anyhow!("error downloading release: {}", err))?;
-            let decompressed_bytes = GzipDecoder::new(BufReader::new(response.body_mut()));
-            let archive = Archive::new(decompressed_bytes);
-            archive.unpack(&destination_path).await?;
+            util::archive::extract_tar_gz(&destination_path, response.body_mut()).await?;
 
             let mut dir = fs::read_dir(&destination_path).await?;
             let first = dir.next().await.ok_or(anyhow!("missing first file"))??;

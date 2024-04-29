@@ -2520,9 +2520,7 @@ name = "copilot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
  "async-std",
- "async-tar",
  "clock",
  "collections",
  "command_palette_hooks",
@@ -5575,8 +5573,6 @@ name = "languages"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
- "async-tar",
  "async-trait",
  "collections",
  "feature_flags",
@@ -6301,7 +6297,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "fs",
  "futures 0.3.28",
  "log",
  "semver",

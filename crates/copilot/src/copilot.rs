@@ -1,7 +1,5 @@
 pub mod request;
 use anyhow::{anyhow, Context as _, Result};
-use async_compression::futures::bufread::GzipDecoder;
-use async_tar::Archive;
 use collections::{HashMap, HashSet};
 use command_palette_hooks::CommandPaletteFilter;
 use futures::{channel::oneshot, future::Shared, Future, FutureExt, TryFutureExt};
@@ -19,7 +17,7 @@ use node_runtime::NodeRuntime;
 use parking_lot::Mutex;
 use request::StatusNotification;
 use settings::SettingsStore;
-use smol::{fs, io::BufReader, stream::StreamExt};
+use smol::{fs, stream::StreamExt};
 use std::{
     any::TypeId,
     ffi::OsString,
@@ -991,10 +989,8 @@ async fn get_copilot_lsp(http: Arc<dyn HttpClient>) -> anyhow::Result<PathBuf> {
                 .get(url, Default::default(), true)
                 .await
                 .context("error downloading copilot release")?;
-            let decompressed_bytes = GzipDecoder::new(BufReader::new(response.body_mut()));
-            let archive = Archive::new(decompressed_bytes);
-            archive.unpack(dist_dir).await?;
 
+            util::archive::extract_tar_gz(&dist_dir, response.body_mut()).await?;
             remove_matching(&paths::COPILOT_DIR, |entry| entry != version_dir).await;
         }
 

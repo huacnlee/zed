@@ -1,11 +1,9 @@
 use anyhow::{anyhow, Result};
-use async_compression::futures::bufread::GzipDecoder;
-use futures::io::BufReader;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
-use async_tar::Archive;
+use futures::io::BufReader;
 use futures::{future::BoxFuture, AsyncRead, Stream, StreamExt};
 use git::repository::{GitRepository, RealGitRepository};
 use git2::Repository as LibGitRepository;
@@ -1176,8 +1174,8 @@ impl Fs for FakeFs {
         path: &Path,
         content: Pin<&mut (dyn AsyncRead + Send)>,
     ) -> Result<()> {
-        let body = GzipDecoder::new(BufReader::new(content));
-        let content = Archive::new(body);
+        let body = async_compression::futures::bufread::GzipDecoder::new(BufReader::new(content));
+        let content = async_tar::Archive::new(body);
         let mut entries = content.entries()?;
         while let Some(entry) = entries.next().await {
             let mut entry = entry?;

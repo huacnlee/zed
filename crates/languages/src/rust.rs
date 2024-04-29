@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
-use async_compression::futures::bufread::GzipDecoder;
 use async_trait::async_trait;
-use futures::{io::BufReader, StreamExt};
+use futures::StreamExt;
 use gpui::AsyncAppContext;
 pub use language::*;
 use lazy_static::lazy_static;
@@ -9,7 +8,7 @@ use lsp::LanguageServerBinary;
 use project::project_settings::ProjectSettings;
 use regex::Regex;
 use settings::Settings;
-use smol::fs::{self, File};
+use smol::fs;
 use std::{
     any::Any,
     borrow::Cow,
@@ -107,9 +106,7 @@ impl LspAdapter for RustLspAdapter {
                 .get(&version.url, Default::default(), true)
                 .await
                 .map_err(|err| anyhow!("error downloading release: {}", err))?;
-            let decompressed_bytes = GzipDecoder::new(BufReader::new(response.body_mut()));
-            let mut file = File::create(&destination_path).await?;
-            futures::io::copy(decompressed_bytes, &mut file).await?;
+            util::archive::extract_gz(&destination_path, response.body_mut()).await?;
             // todo("windows")
             #[cfg(not(windows))]
             {
