@@ -8,7 +8,7 @@ use async_zip::{
     ZipEntryBuilder,
 };
 use futures::{io::BufReader, AsyncRead};
-use smol::io::AsyncReadExt;
+use smol::io::AsyncWriteExt;
 
 pub async fn extract_gz<R: AsyncRead + Unpin>(dst: &Path, reader: R) -> Result<()> {
     let decompressed_bytes = GzipDecoder::new(BufReader::new(reader));
@@ -63,21 +63,22 @@ pub async fn extract_zip<R: AsyncRead + Unpin>(dst: &Path, reader: R) -> Result<
     let mut reader = ZipFileReader::new(BufReader::new(reader));
 
     let dst = &dst.canonicalize().unwrap_or_else(|_| dst.to_path_buf());
+
     while let Some(mut item) = reader.next_with_entry().await? {
         let entry_reader = item.reader_mut();
         let entry = entry_reader.entry();
         let path = dst.join(entry.filename().as_str().unwrap());
 
         if entry.dir().unwrap() {
-            smol::fs::create_dir_all(&path).await?;
+            std::fs::create_dir_all(&path)?;
         } else {
             let parent_dir = path.parent().expect("failed to get parent directory");
-            smol::fs::create_dir_all(&parent_dir).await?;
+            std::fs::create_dir_all(&parent_dir)?;
             let mut file = smol::fs::File::create(&path).await?;
             futures::io::copy(entry_reader, &mut file).await?;
         }
 
-        reader = item.done().await?;
+        reader = item.skip().await?;
     }
 
     Ok(())
@@ -85,8 +86,8 @@ pub async fn extract_zip<R: AsyncRead + Unpin>(dst: &Path, reader: R) -> Result<
 
 #[allow(dead_code)]
 async fn compress_zip(src_dir: &Path, dst: &Path) -> Result<()> {
-    let out = smol::fs::File::create(dst).await?;
-    let mut writer = ZipFileWriter::new(out);
+    let mut out = smol::fs::File::create(dst).await?;
+    let mut writer = ZipFileWriter::new(&mut out);
 
     for entry in walkdir::WalkDir::new(src_dir) {
         let entry = entry?;
@@ -97,28 +98,25 @@ async fn compress_zip(src_dir: &Path, dst: &Path) -> Result<()> {
         }
 
         let relative_path = path.strip_prefix(src_dir)?;
+        let data = smol::fs::read(&path).await?;
 
-        let mut data = Vec::new();
-        let mut f = smol::fs::File::open(&path).await?;
-        f.read_to_end(&mut data).await?;
-
-        let builder = ZipEntryBuilder::new(
-            relative_path.display().to_string().into(),
-            async_zip::Compression::Deflate,
-        );
+        let filename = relative_path.display().to_string();
+        let builder = ZipEntryBuilder::new(filename.into(), async_zip::Compression::Deflate);
 
         writer.write_entry_whole(builder, &data).await?;
     }
 
     writer.close().await?;
+    out.flush().await?;
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Read, path::PathBuf};
+    use std::path::PathBuf;
 
-    use smol::io::{BufReader, Cursor};
+    use smol::io::Cursor;
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
@@ -136,30 +134,29 @@ mod tests {
         let dst = dir.path();
 
         std::fs::write(&dst.join("test"), "Hello world.").unwrap();
-        std::fs::create_dir(&dst.join("foo")).unwrap();
+        std::fs::create_dir_all(&dst.join("foo/bar")).unwrap();
         std::fs::write(&dst.join("foo/bar.txt"), "Foo bar.").unwrap();
+        std::fs::write(&dst.join("foo/dar.md"), "Bar dar.").unwrap();
+        std::fs::write(&dst.join("foo/bar/dar你好.txt"), "你好世界").unwrap();
 
         dir
     }
 
-    #[track_caller]
-    fn read_archive(path: &PathBuf) -> BufReader<Cursor<Vec<u8>>> {
-        let mut data = vec![];
-        let mut gz_file = std::fs::File::open(&path).unwrap();
-        gz_file.read_to_end(&mut data).unwrap();
-        BufReader::new(Cursor::new(data))
+    async fn read_archive(path: &PathBuf) -> impl AsyncRead + Unpin {
+        let data = smol::fs::read(&path).await.unwrap();
+        Cursor::new(data)
     }
 
     #[test]
     fn test_extract_gz() {
-        smol::block_on(async {
-            let test_dir = make_test_data();
-            let src_file = test_dir.path().join("test");
-            let gz_file = test_dir.path().join("test.gz");
+        let test_dir = make_test_data();
+        let src_file = test_dir.path().join("test");
+        let gz_file = test_dir.path().join("test.gz");
 
+        smol::block_on(async {
             compress_gz(&src_file, &gz_file).await.unwrap();
 
-            let reader = read_archive(&gz_file);
+            let reader = read_archive(&gz_file).await;
             let out_file = NamedTempFile::new().unwrap();
             extract_gz(&out_file.path(), reader).await.unwrap();
 
@@ -169,12 +166,12 @@ mod tests {
 
     #[test]
     fn test_extract_tar_gz() {
-        smol::block_on(async {
-            let test_dir = make_test_data();
-            let tgz_file = test_dir.path().join("test.tar.gz");
+        let test_dir = make_test_data();
+        let tgz_file = test_dir.path().join("test.tar.gz");
 
+        smol::block_on(async {
             compress_tar_gz(&test_dir.path(), &tgz_file).await.unwrap();
-            let reader = read_archive(&tgz_file);
+            let reader = read_archive(&tgz_file).await;
 
             let dir = tempfile::tempdir().unwrap();
             let dst = dir.path();
@@ -182,18 +179,19 @@ mod tests {
 
             assert_file_content(&dst.join("test"), "Hello world.");
             assert_file_content(&dst.join("foo/bar.txt"), "Foo bar.");
-            dir.close().unwrap();
+            assert_file_content(&dst.join("foo/dar.md"), "Bar dar.");
+            assert_file_content(&dst.join("foo/bar/dar你好.txt"), "你好世界");
         });
     }
 
     #[test]
     fn test_extract_zip() {
-        smol::block_on(async {
-            let test_dir = make_test_data();
-            let tgz_file = test_dir.path().join("test.zip");
+        let test_dir = make_test_data();
+        let zip_file = test_dir.path().join("test.zip");
 
-            compress_zip(&test_dir.path(), &tgz_file).await.unwrap();
-            let reader = read_archive(&tgz_file);
+        smol::block_on(async {
+            compress_zip(&test_dir.path(), &zip_file).await.unwrap();
+            let reader = read_archive(&zip_file).await;
 
             let dir = tempfile::tempdir().unwrap();
             let dst = dir.path();
@@ -201,7 +199,8 @@ mod tests {
 
             assert_file_content(&dst.join("test"), "Hello world.");
             assert_file_content(&dst.join("foo/bar.txt"), "Foo bar.");
-            dir.close().unwrap();
+            assert_file_content(&dst.join("foo/dar.md"), "Bar dar.");
+            assert_file_content(&dst.join("foo/bar/dar你好.txt"), "你好世界");
         });
     }
 }

@@ -1196,7 +1196,7 @@ impl Fs for FakeFs {
                 self.write_file_internal(&path, bytes)?;
             }
 
-            reader = item.done().await?;
+            reader = item.skip().await?;
         }
 
         Ok(())
