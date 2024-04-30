@@ -21,7 +21,7 @@ const NODE_PATH: &str = "node.exe";
 const NODE_PATH: &str = "bin/node";
 
 #[cfg(windows)]
-const NPM_PATH: &str = "npm.cmd";
+const NPM_PATH: &str = "node_modules/npm/bin/npm-cli.js";
 #[cfg(not(windows))]
 const NPM_PATH: &str = "bin/npm";
 
@@ -195,16 +195,16 @@ impl NodeRuntime for RealNodeRuntime {
         let attempt = || async move {
             let installation_path = self.install_if_needed().await?;
 
-            let mut env_path = installation_path.join("bin").into_os_string();
+            let node_binary = installation_path.join(NODE_PATH);
+            let npm_file = installation_path.join(NPM_PATH);
+            let mut env_path = node_binary.parent().unwrap().to_path_buf();
+
             if let Some(existing_path) = std::env::var_os("PATH") {
                 if !existing_path.is_empty() {
                     env_path.push(":");
                     env_path.push(&existing_path);
                 }
             }
-
-            let node_binary = installation_path.join(NODE_PATH);
-            let npm_file = installation_path.join(NPM_PATH);
 
             if smol::fs::metadata(&node_binary).await.is_err() {
                 return Err(anyhow!("missing node binary file"));
@@ -242,7 +242,8 @@ impl NodeRuntime for RealNodeRuntime {
             output = attempt().await;
             if output.is_err() {
                 return Err(anyhow!(
-                    "failed to launch npm subcommand {subcommand} subcommand"
+                    "failed to launch npm subcommand {subcommand} subcommand\nerr: {:?}",
+                    output.err()
                 ));
             }
         }

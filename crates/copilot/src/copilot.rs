@@ -421,11 +421,16 @@ impl Copilot {
                     env: None,
                 };
 
+                #[cfg(not(windows))]
+                let root_path = Path::new("/");
+                #[cfg(windows)]
+                let root_path = Path::new("C:/");
+
                 let server = LanguageServer::new(
                     Arc::new(Mutex::new(None)),
                     new_server_id,
                     binary,
-                    Path::new("/"),
+                    root_path,
                     None,
                     cx.clone(),
                 )?;
@@ -962,10 +967,7 @@ async fn clear_copilot_dir() {
 }
 
 async fn get_copilot_lsp(http: Arc<dyn HttpClient>) -> anyhow::Result<PathBuf> {
-    #[cfg(not(windows))]
     const SERVER_PATH: &str = "dist/agent.js";
-    #[cfg(windows)]
-    const SERVER_PATH: &str = "dist\\agent.js";
 
     ///Check for the latest copilot language server and download it if we haven't already
     async fn fetch_latest(http: Arc<dyn HttpClient>) -> anyhow::Result<PathBuf> {
