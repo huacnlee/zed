@@ -217,6 +217,10 @@ impl NodeRuntime for RealNodeRuntime {
             let mut command = Command::new(node_binary);
             command.env_clear();
             command.env("PATH", env_path);
+            // Set proxy arg, if user's env has `http_proxy`.
+            if let Some(http_proxy) = std::env::var("http_proxy").ok() {
+                command.env("http_proxy", http_proxy);
+            }
             command.arg(npm_file).arg(subcommand);
             command.args(["--cache".into(), installation_path.join("cache")]);
             command.args([
