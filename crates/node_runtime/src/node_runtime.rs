@@ -13,6 +13,9 @@ use std::{
 use util::http::HttpClient;
 use util::ResultExt;
 
+#[cfg(windows)]
+use smol::process::windows::CommandExt;
+
 const VERSION: &str = "v18.15.0";
 
 #[cfg(windows)]
@@ -130,7 +133,9 @@ impl RealNodeRuntime {
         let node_binary = node_dir.join(NODE_PATH);
         let npm_file = node_dir.join(NPM_PATH);
 
-        let result = Command::new(&node_binary)
+        let mut command = Command::new(&node_binary);
+
+        command
             .env_clear()
             .arg(npm_file)
             .arg("--version")
@@ -139,9 +144,12 @@ impl RealNodeRuntime {
             .stderr(Stdio::null())
             .args(["--cache".into(), node_dir.join("cache")])
             .args(["--userconfig".into(), node_dir.join("blank_user_npmrc")])
-            .args(["--globalconfig".into(), node_dir.join("blank_global_npmrc")])
-            .status()
-            .await;
+            .args(["--globalconfig".into(), node_dir.join("blank_global_npmrc")]);
+
+        #[cfg(windows)]
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+
+        let result = command.status().await;
         let valid = matches!(result, Ok(status) if status.success());
 
         if !valid {
@@ -215,28 +223,35 @@ impl NodeRuntime for RealNodeRuntime {
             }
 
             let mut command = Command::new(node_binary);
-            command.env_clear();
-            command.env("PATH", env_path);
+            command
+                .env_clear()
+                .env("PATH", env_path)
+                .arg(npm_file)
+                .arg(subcommand)
+                .args(["--cache".into(), installation_path.join("cache")])
+                .args([
+                    "--userconfig".into(),
+                    installation_path.join("blank_user_npmrc"),
+                ])
+                .args([
+                    "--globalconfig".into(),
+                    installation_path.join("blank_global_npmrc"),
+                ])
+                .args(args);
+
             // Set proxy arg, if user's env has `http_proxy`.
             if let Some(http_proxy) = std::env::var("http_proxy").ok() {
                 command.env("http_proxy", http_proxy);
             }
-            command.arg(npm_file).arg(subcommand);
-            command.args(["--cache".into(), installation_path.join("cache")]);
-            command.args([
-                "--userconfig".into(),
-                installation_path.join("blank_user_npmrc"),
-            ]);
-            command.args([
-                "--globalconfig".into(),
-                installation_path.join("blank_global_npmrc"),
-            ]);
-            command.args(args);
 
             if let Some(directory) = directory {
-                command.current_dir(directory);
-                command.args(["--prefix".into(), directory.to_path_buf()]);
+                command
+                    .current_dir(directory)
+                    .args(["--prefix".into(), directory.to_path_buf()]);
             }
+
+            #[cfg(windows)]
+            command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
 
             command.output().await.map_err(|e| anyhow!("{e}"))
         };

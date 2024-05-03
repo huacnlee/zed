@@ -6324,6 +6324,7 @@ dependencies = [
  "serde_json",
  "smol",
  "util",
+ "windows 0.53.0",
 ]
 
 [[package]]
