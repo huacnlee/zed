@@ -13,7 +13,11 @@ use raw_window_handle as rwh;
 use util::ResultExt;
 use x11rb::{
     connection::Connection,
-    protocol::xproto::{self, ConnectionExt as _, CreateWindowAux},
+    protocol::{
+        xinput,
+        xproto::{self, ConnectionExt as _, CreateWindowAux},
+    },
+    resource_manager::Database,
     wrapper::ConnectionExt,
     xcb_ffi::XCBConnection,
 };
@@ -24,6 +28,7 @@ use std::{
     iter::Zip,
     mem,
     num::NonZeroU32,
+    ops::Div,
     ptr::NonNull,
     rc::Rc,
     sync::{self, Arc},
@@ -125,6 +130,7 @@ impl rwh::HasDisplayHandle for X11Window {
 }
 
 impl X11WindowState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: X11ClientStatePtr,
         executor: ForegroundExecutor,
@@ -133,6 +139,7 @@ impl X11WindowState {
         x_main_screen_index: usize,
         x_window: xproto::Window,
         atoms: &XcbAtoms,
+        scale_factor: f32,
     ) -> Self {
         let x_screen_index = params
             .display_id
@@ -153,8 +160,6 @@ impl X11WindowState {
                 | xproto::EventMask::BUTTON1_MOTION
                 | xproto::EventMask::BUTTON2_MOTION
                 | xproto::EventMask::BUTTON3_MOTION
-                | xproto::EventMask::BUTTON4_MOTION
-                | xproto::EventMask::BUTTON5_MOTION
                 | xproto::EventMask::BUTTON_MOTION,
         );
 
@@ -173,6 +178,18 @@ impl X11WindowState {
                 &win_aux,
             )
             .unwrap();
+
+        xinput::ConnectionExt::xinput_xi_select_events(
+            &xcb_connection,
+            x_window,
+            &[xinput::EventMask {
+                deviceid: 1,
+                mask: vec![xinput::XIEventMask::MOTION],
+            }],
+        )
+        .unwrap()
+        .check()
+        .unwrap();
 
         if let Some(titlebar) = params.titlebar {
             if let Some(title) = titlebar.title {
@@ -233,7 +250,7 @@ impl X11WindowState {
             display: Rc::new(X11Display::new(xcb_connection, x_screen_index).unwrap()),
             raw,
             bounds: params.bounds.map(|v| v.0),
-            scale_factor: 1.0,
+            scale_factor,
             renderer: BladeRenderer::new(gpu, gpu_extent),
             atoms: *atoms,
 
@@ -278,6 +295,7 @@ impl Drop for X11Window {
 }
 
 impl X11Window {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: X11ClientStatePtr,
         executor: ForegroundExecutor,
@@ -286,6 +304,7 @@ impl X11Window {
         x_main_screen_index: usize,
         x_window: xproto::Window,
         atoms: &XcbAtoms,
+        scale_factor: f32,
     ) -> Self {
         Self(X11WindowStatePtr {
             state: Rc::new(RefCell::new(X11WindowState::new(
@@ -296,6 +315,7 @@ impl X11Window {
                 x_main_screen_index,
                 x_window,
                 atoms,
+                scale_factor,
             ))),
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
             xcb_connection: xcb_connection.clone(),
@@ -389,7 +409,7 @@ impl X11WindowStatePtr {
 
 impl PlatformWindow for X11Window {
     fn bounds(&self) -> Bounds<DevicePixels> {
-        self.0.state.borrow_mut().bounds.map(|v| v.into())
+        self.0.state.borrow().bounds.map(|v| v.into())
     }
 
     // todo(linux)
@@ -403,11 +423,16 @@ impl PlatformWindow for X11Window {
     }
 
     fn content_size(&self) -> Size<Pixels> {
-        self.0.state.borrow_mut().content_size()
+        // We divide by the scale factor here because this value is queried to determine how much to draw,
+        // but it will be multiplied later by the scale to adjust for scaling.
+        let state = self.0.state.borrow();
+        state
+            .content_size()
+            .map(|size| size.div(state.scale_factor))
     }
 
     fn scale_factor(&self) -> f32 {
-        self.0.state.borrow_mut().scale_factor
+        self.0.state.borrow().scale_factor
     }
 
     // todo(linux)
@@ -433,10 +458,6 @@ impl PlatformWindow for X11Window {
     // todo(linux)
     fn modifiers(&self) -> Modifiers {
         Modifiers::default()
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
@@ -494,6 +515,21 @@ impl PlatformWindow for X11Window {
             .unwrap();
     }
 
+    fn set_app_id(&mut self, app_id: &str) {
+        let mut data = Vec::with_capacity(app_id.len() * 2 + 1);
+        data.extend(app_id.bytes()); // instance https://unix.stackexchange.com/a/494170
+        data.push(b'\0');
+        data.extend(app_id.bytes()); // class
+
+        self.0.xcb_connection.change_property8(
+            xproto::PropMode::REPLACE,
+            self.0.x_window,
+            xproto::AtomEnum::WM_CLASS,
+            xproto::AtomEnum::STRING,
+            &data,
+        );
+    }
+
     // todo(linux)
     fn set_edited(&mut self, edited: bool) {}
 
@@ -547,10 +583,6 @@ impl PlatformWindow for X11Window {
         self.0.callbacks.borrow_mut().resize = Some(callback);
     }
 
-    fn on_fullscreen(&self, callback: Box<dyn FnMut(bool)>) {
-        self.0.callbacks.borrow_mut().fullscreen = Some(callback);
-    }
-
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
         self.0.callbacks.borrow_mut().moved = Some(callback);
     }
@@ -565,11 +597,6 @@ impl PlatformWindow for X11Window {
 
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
         self.0.callbacks.borrow_mut().appearance_changed = Some(callback);
-    }
-
-    // todo(linux)
-    fn is_topmost_for_position(&self, _position: Point<Pixels>) -> bool {
-        unimplemented!()
     }
 
     fn draw(&self, scene: &Scene) {

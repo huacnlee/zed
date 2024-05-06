@@ -64,6 +64,7 @@ impl rwh::HasDisplayHandle for RawWindow {
 
 pub struct WaylandWindowState {
     xdg_surface: xdg_surface::XdgSurface,
+    acknowledged_first_configure: bool,
     pub surface: wl_surface::WlSurface,
     decoration: Option<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
     toplevel: xdg_toplevel::XdgToplevel,
@@ -131,6 +132,7 @@ impl WaylandWindowState {
 
         Self {
             xdg_surface,
+            acknowledged_first_configure: false,
             surface,
             decoration,
             toplevel,
@@ -227,8 +229,6 @@ impl WaylandWindow {
             .as_ref()
             .map(|viewporter| viewporter.get_viewport(&surface, &globals.qh, ()));
 
-        surface.frame(&globals.qh, surface.id());
-
         let this = Self(WaylandWindowStatePtr {
             state: Rc::new(RefCell::new(WaylandWindowState::new(
                 surface.clone(),
@@ -251,12 +251,16 @@ impl WaylandWindow {
 }
 
 impl WaylandWindowStatePtr {
+    pub fn surface(&self) -> wl_surface::WlSurface {
+        self.state.borrow().surface.clone()
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.state, &other.state)
     }
 
-    pub fn frame(&self, from_frame_callback: bool) {
-        if from_frame_callback {
+    pub fn frame(&self, request_frame_callback: bool) {
+        if request_frame_callback {
             let state = self.state.borrow_mut();
             state.surface.frame(&state.globals.qh, state.surface.id());
             drop(state);
@@ -270,10 +274,12 @@ impl WaylandWindowStatePtr {
     pub fn handle_xdg_surface_event(&self, event: xdg_surface::Event) {
         match event {
             xdg_surface::Event::Configure { serial } => {
-                let state = self.state.borrow();
+                let mut state = self.state.borrow_mut();
                 state.xdg_surface.ack_configure(serial);
+                let request_frame_callback = !state.acknowledged_first_configure;
+                state.acknowledged_first_configure = true;
                 drop(state);
-                self.frame(false);
+                self.frame(request_frame_callback);
             }
             _ => {}
         }
@@ -574,10 +580,6 @@ impl PlatformWindow for WaylandWindow {
         crate::Modifiers::default()
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
         self.borrow_mut().input_handler = Some(input_handler);
     }
@@ -607,6 +609,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn set_title(&mut self, title: &str) {
         self.borrow_mut().toplevel.set_title(title.to_string());
+    }
+
+    fn set_app_id(&mut self, app_id: &str) {
+        self.borrow_mut().toplevel.set_app_id(app_id.to_owned());
     }
 
     fn set_background_appearance(&mut self, _background_appearance: WindowBackgroundAppearance) {
@@ -658,10 +664,6 @@ impl PlatformWindow for WaylandWindow {
         self.0.callbacks.borrow_mut().resize = Some(callback);
     }
 
-    fn on_fullscreen(&self, callback: Box<dyn FnMut(bool)>) {
-        self.0.callbacks.borrow_mut().fullscreen = Some(callback);
-    }
-
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
         self.0.callbacks.borrow_mut().moved = Some(callback);
     }
@@ -676,11 +678,6 @@ impl PlatformWindow for WaylandWindow {
 
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
         // todo(linux)
-    }
-
-    // todo(linux)
-    fn is_topmost_for_position(&self, position: Point<Pixels>) -> bool {
-        false
     }
 
     fn draw(&self, scene: &Scene) {

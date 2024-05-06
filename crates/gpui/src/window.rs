@@ -95,7 +95,8 @@ slotmap::new_key_type! {
 }
 
 thread_local! {
-    pub(crate) static ELEMENT_ARENA: RefCell<Arena> = RefCell::new(Arena::new(8 * 1024 * 1024));
+    /// 8MB wasn't quite enough...
+    pub(crate) static ELEMENT_ARENA: RefCell<Arena> = RefCell::new(Arena::new(32 * 1024 * 1024));
 }
 
 impl FocusId {
@@ -600,10 +601,11 @@ impl Window {
             display_id,
             fullscreen,
             window_background,
+            app_id,
         } = options;
 
         let bounds = bounds.unwrap_or_else(|| default_bounds(display_id, cx));
-        let platform_window = cx.platform.open_window(
+        let mut platform_window = cx.platform.open_window(
             handle,
             WindowParams {
                 bounds,
@@ -734,6 +736,10 @@ impl Window {
                     .unwrap_or(DispatchEventResult::default())
             })
         });
+
+        if let Some(app_id) = app_id {
+            platform_window.set_app_id(&app_id);
+        }
 
         Window {
             handle,
@@ -1125,6 +1131,11 @@ impl<'a> WindowContext<'a> {
         self.window.platform_window.set_title(title);
     }
 
+    /// Sets the application identifier.
+    pub fn set_app_id(&mut self, app_id: &str) {
+        self.window.platform_window.set_app_id(app_id);
+    }
+
     /// Sets the window background appearance.
     pub fn set_background_appearance(&mut self, background_appearance: WindowBackgroundAppearance) {
         self.window
@@ -1419,8 +1430,12 @@ impl<'a> WindowContext<'a> {
         let mut deferred_draws = mem::take(&mut self.window.next_frame.deferred_draws);
         for deferred_draw_ix in deferred_draw_indices {
             let deferred_draw = &mut deferred_draws[*deferred_draw_ix];
-            self.window.element_id_stack = deferred_draw.element_id_stack.clone();
-            self.window.text_style_stack = deferred_draw.text_style_stack.clone();
+            self.window
+                .element_id_stack
+                .clone_from(&deferred_draw.element_id_stack);
+            self.window
+                .text_style_stack
+                .clone_from(&deferred_draw.text_style_stack);
             self.window
                 .next_frame
                 .dispatch_tree
@@ -1453,7 +1468,9 @@ impl<'a> WindowContext<'a> {
         let mut deferred_draws = mem::take(&mut self.window.next_frame.deferred_draws);
         for deferred_draw_ix in deferred_draw_indices {
             let mut deferred_draw = &mut deferred_draws[*deferred_draw_ix];
-            self.window.element_id_stack = deferred_draw.element_id_stack.clone();
+            self.window
+                .element_id_stack
+                .clone_from(&deferred_draw.element_id_stack);
             self.window
                 .next_frame
                 .dispatch_tree

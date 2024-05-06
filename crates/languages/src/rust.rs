@@ -386,6 +386,7 @@ impl ContextProvider for RustContextProvider {
                     "--".into(),
                     "--nocapture".into(),
                 ],
+                tags: vec!["rust-test".to_owned()],
                 ..TaskTemplate::default()
             },
             TaskTemplate {

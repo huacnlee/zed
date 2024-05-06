@@ -1,4 +1,7 @@
+mod copilot_completion_provider;
 pub mod request;
+mod sign_in;
+
 use anyhow::{anyhow, Context as _, Result};
 use collections::{HashMap, HashSet};
 use command_palette_hooks::CommandPaletteFilter;
@@ -8,9 +11,9 @@ use gpui::{
     ModelContext, Task, WeakModel,
 };
 use language::{
-    language_settings::{all_language_settings, language_settings},
-    point_from_lsp, point_to_lsp, Anchor, Bias, Buffer, BufferSnapshot, Language,
-    LanguageServerName, PointUtf16, ToPointUtf16,
+    language_settings::{all_language_settings, language_settings, InlineCompletionProvider},
+    point_from_lsp, point_to_lsp, Anchor, Bias, Buffer, BufferSnapshot, Language, PointUtf16,
+    ToPointUtf16,
 };
 use lsp::{LanguageServer, LanguageServerBinary, LanguageServerId};
 use node_runtime::NodeRuntime;
@@ -29,6 +32,9 @@ use std::{
 use util::{
     fs::remove_matching, github::latest_github_release, http::HttpClient, maybe, paths, ResultExt,
 };
+
+pub use copilot_completion_provider::CopilotCompletionProvider;
+pub use sign_in::CopilotCodeVerification;
 
 actions!(
     copilot,
@@ -142,7 +148,6 @@ impl CopilotServer {
 }
 
 struct RunningCopilotServer {
-    name: LanguageServerName,
     lsp: Arc<LanguageServer>,
     sign_in_status: SignInStatus,
     registered_buffers: HashMap<EntityId, RegisteredBuffer>,
@@ -352,7 +357,9 @@ impl Copilot {
         let server_id = self.server_id;
         let http = self.http.clone();
         let node_runtime = self.node_runtime.clone();
-        if all_language_settings(None, cx).copilot_enabled(None, None) {
+        if all_language_settings(None, cx).inline_completions.provider
+            == InlineCompletionProvider::Copilot
+        {
             if matches!(self.server, CopilotServer::Disabled) {
                 let start_task = cx
                     .spawn(move |this, cx| {
@@ -391,7 +398,6 @@ impl Copilot {
             http: http.clone(),
             node_runtime,
             server: CopilotServer::Running(RunningCopilotServer {
-                name: LanguageServerName(Arc::from("copilot")),
                 lsp: Arc::new(server),
                 sign_in_status: SignInStatus::Authorized,
                 registered_buffers: Default::default(),
@@ -470,7 +476,6 @@ impl Copilot {
                 match server {
                     Ok((server, status)) => {
                         this.server = CopilotServer::Running(RunningCopilotServer {
-                            name: LanguageServerName(Arc::from("copilot")),
                             lsp: server,
                             sign_in_status: SignInStatus::SignedOut,
                             registered_buffers: Default::default(),
@@ -610,9 +615,9 @@ impl Copilot {
         cx.background_executor().spawn(start_task)
     }
 
-    pub fn language_server(&self) -> Option<(&LanguageServerName, &Arc<LanguageServer>)> {
+    pub fn language_server(&self) -> Option<&Arc<LanguageServer>> {
         if let CopilotServer::Running(server) = &self.server {
-            Some((&server.name, &server.lsp))
+            Some(&server.lsp)
         } else {
             None
         }
@@ -946,12 +951,9 @@ impl Copilot {
 }
 
 fn id_for_language(language: Option<&Arc<Language>>) -> String {
-    let language_name = language.map(|language| language.name());
-    match language_name.as_deref() {
-        Some("Plain Text") => "plaintext".to_string(),
-        Some(language_name) => language_name.to_lowercase(),
-        None => "plaintext".to_string(),
-    }
+    language
+        .map(|language| language.lsp_id())
+        .unwrap_or_else(|| "plaintext".to_string())
 }
 
 fn uri_for_buffer(buffer: &Model<Buffer>, cx: &AppContext) -> lsp::Url {

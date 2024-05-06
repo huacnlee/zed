@@ -144,10 +144,6 @@ impl PlatformWindow for TestWindow {
         crate::Modifiers::default()
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
         self.0.lock().input_handler = Some(input_handler);
     }
@@ -189,6 +185,8 @@ impl PlatformWindow for TestWindow {
     fn set_title(&mut self, title: &str) {
         self.0.lock().title = Some(title.to_owned());
     }
+
+    fn set_app_id(&mut self, _app_id: &str) {}
 
     fn set_background_appearance(&mut self, _background: WindowBackgroundAppearance) {
         unimplemented!()
@@ -233,10 +231,6 @@ impl PlatformWindow for TestWindow {
         self.0.lock().resize_callback = Some(callback)
     }
 
-    fn on_fullscreen(&self, _callback: Box<dyn FnMut(bool)>) {
-        unimplemented!()
-    }
-
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
         self.0.lock().moved_callback = Some(callback)
     }
@@ -248,10 +242,6 @@ impl PlatformWindow for TestWindow {
     fn on_close(&self, _callback: Box<dyn FnOnce()>) {}
 
     fn on_appearance_changed(&self, _callback: Box<dyn FnMut()>) {}
-
-    fn is_topmost_for_position(&self, _position: crate::Point<Pixels>) -> bool {
-        unimplemented!()
-    }
 
     fn draw(&self, _scene: &crate::Scene) {}
 
