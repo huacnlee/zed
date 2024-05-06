@@ -11072,11 +11072,13 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "smol",
  "take-until",
  "tempfile",
  "tendril",
  "unicase",
  "url",
+ "windows 0.53.0",
 ]
 
 [[package]]

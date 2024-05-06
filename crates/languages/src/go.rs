@@ -9,7 +9,7 @@ use project::project_settings::{BinarySettings, ProjectSettings};
 use regex::Regex;
 use serde_json::json;
 use settings::Settings;
-use smol::{fs, process};
+use smol::fs;
 use std::{
     any::Any,
     ffi::{OsStr, OsString},
@@ -22,6 +22,11 @@ use std::{
     },
 };
 use util::{fs::remove_matching, github::latest_github_release, maybe, ResultExt};
+
+#[cfg(not(windows))]
+const BIN_EXT: &str = "";
+#[cfg(windows)]
+const BIN_EXT: &str = ".exe";
 
 fn server_binary_arguments() -> Vec<OsString> {
     vec!["-mode=stdio".into()]
@@ -109,7 +114,10 @@ impl super::LspAdapter for GoLspAdapter {
 
         let delegate = delegate.clone();
         Some(cx.spawn(|cx| async move {
-            let install_output = process::Command::new("go").args(["version"]).output().await;
+            let install_output = util::process::command("go")
+                .args(["version"])
+                .output()
+                .await;
             if install_output.is_err() {
                 if DID_SHOW_NOTIFICATION
                     .compare_exchange(false, true, SeqCst, SeqCst)
@@ -119,7 +127,7 @@ impl super::LspAdapter for GoLspAdapter {
                         delegate.show_notification(NOTIFICATION_MESSAGE, cx);
                     })?
                 }
-                return Err(anyhow!("cannot install gopls"));
+                return Err(anyhow!("cannot install gopls, `go` not found"));
             }
             Ok(())
         }))
@@ -135,7 +143,7 @@ impl super::LspAdapter for GoLspAdapter {
         let this = *self;
 
         if let Some(version) = *version {
-            let binary_path = container_dir.join(&format!("gopls_{version}"));
+            let binary_path = container_dir.join(&format!("gopls_{version}{BIN_EXT}"));
             if let Ok(metadata) = fs::metadata(&binary_path).await {
                 if metadata.is_file() {
                     remove_matching(&container_dir, |entry| {
@@ -159,7 +167,7 @@ impl super::LspAdapter for GoLspAdapter {
 
         let gobin_dir = container_dir.join("gobin");
         fs::create_dir_all(&gobin_dir).await?;
-        let install_output = process::Command::new("go")
+        let install_output = util::process::command("go")
             .env("GO111MODULE", "on")
             .env("GOBIN", &gobin_dir)
             .args(["install", "golang.org/x/tools/gopls@latest"])
@@ -176,8 +184,8 @@ impl super::LspAdapter for GoLspAdapter {
             return Err(anyhow!("failed to install gopls with `go install`. Is `go` installed and in the PATH? Check logs for more information."));
         }
 
-        let installed_binary_path = gobin_dir.join("gopls");
-        let version_output = process::Command::new(&installed_binary_path)
+        let installed_binary_path = gobin_dir.join(format!("gopls{BIN_EXT}"));
+        let version_output = util::process::command(&installed_binary_path)
             .arg("version")
             .output()
             .await
@@ -188,7 +196,7 @@ impl super::LspAdapter for GoLspAdapter {
             .find(version_stdout)
             .with_context(|| format!("failed to parse golps version output '{version_stdout}'"))?
             .as_str();
-        let binary_path = container_dir.join(&format!("gopls_{version}"));
+        let binary_path = container_dir.join(&format!("gopls_{version}{BIN_EXT}"));
         fs::rename(&installed_binary_path, &binary_path).await?;
 
         Ok(LanguageServerBinary {
