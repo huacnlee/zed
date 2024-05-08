@@ -160,7 +160,8 @@ impl RealNodeRuntime {
 
             let ext = match consts::OS {
                 "windows" => "zip",
-                _ => "tar.gz",
+                "linux" | "macos" => "tar.gz",
+                other => bail!("Running on unsupported os: {other}"),
             };
 
             let file_name = format!("node-{VERSION}-{os}-{arch}.{ext}");
@@ -174,7 +175,8 @@ impl RealNodeRuntime {
             let body = response.body_mut();
             match ext {
                 "zip" => archive::extract_zip(&node_containing_dir, body).await?,
-                _ => archive::extract_tar_gz(&node_containing_dir, body).await?,
+                "tar.gz" => archive::extract_tar_gz(&node_containing_dir, body).await?,
+                other => bail!("Unsupported extract extension: {other}"),
             }
         }
 
