@@ -259,6 +259,9 @@ impl NodeRuntime for RealNodeRuntime {
                 "--globalconfig".into(),
                 installation_path.join("blank_global_npmrc"),
             ]);
+            if let Some(proxy) = util::http_proxy_from_env() {
+                command.args(["--proxy".into(), proxy.to_string()]);
+            }
             command.args(args);
 
             if let Some(directory) = directory {
