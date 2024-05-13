@@ -146,6 +146,7 @@ impl RealNodeRuntime {
         let mut command = Command::new(&node_binary);
 
         command
+            .kill_on_drop(true)
             .env_clear()
             .arg(npm_file)
             .arg("--version")
@@ -247,6 +248,7 @@ impl NodeRuntime for RealNodeRuntime {
             }
 
             let mut command = Command::new(node_binary);
+            command.kill_on_drop(true);
             command.env_clear();
             command.env("PATH", env_path);
             command.arg(npm_file).arg(subcommand);
