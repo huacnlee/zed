@@ -16,7 +16,7 @@ use std::{
 };
 pub use url::Url;
 
-fn http_proxy_from_env() -> Option<isahc::http::Uri> {
+pub fn http_proxy_from_env() -> Option<isahc::http::Uri> {
     macro_rules! try_env {
         ($($env:literal),+) => {
             $(
