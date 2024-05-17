@@ -1001,7 +1001,10 @@ async fn get_copilot_lsp(http: Arc<dyn HttpClient>) -> anyhow::Result<PathBuf> {
                 .context("error downloading copilot release")?;
             let decompressed_bytes = GzipDecoder::new(BufReader::new(response.body_mut()));
             let archive = Archive::new(decompressed_bytes);
-            archive.unpack(dist_dir).await?;
+            archive
+                .unpack(dist_dir)
+                .await
+                .context("error unpacking copilot archive")?;
 
             remove_matching(&paths::COPILOT_DIR, |entry| entry != version_dir).await;
         }
