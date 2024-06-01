@@ -7,6 +7,8 @@ pub mod notification_panel;
 pub mod notifications;
 mod panel_settings;
 
+i18n::init!();
+
 use std::{rc::Rc, sync::Arc};
 
 use call::{report_call_event_for_room, ActiveCall};

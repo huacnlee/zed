@@ -2422,6 +2422,7 @@ dependencies = [
  "fuzzy",
  "gpui",
  "http 0.1.0",
+ "i18n",
  "language",
  "lazy_static",
  "menu",
@@ -2434,6 +2435,7 @@ dependencies = [
  "release_channel",
  "rich_text",
  "rpc",
+ "rust-i18n",
  "schemars",
  "serde",
  "serde_derive",
@@ -5230,7 +5232,10 @@ dependencies = [
 name = "i18n"
 version = "0.1.0"
 dependencies = [
+ "assets",
  "rust-i18n",
+ "serde_yaml 0.9.34+deprecated",
+ "util",
 ]
 
 [[package]]
@@ -8658,7 +8663,7 @@ dependencies = [
  "rust-i18n-support",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_yaml 0.8.26",
  "syn 2.0.59",
 ]
 
@@ -8677,7 +8682,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_yaml 0.8.26",
  "toml 0.7.8",
  "triomphe",
 ]
@@ -9284,6 +9289,19 @@ dependencies = [
  "ryu",
  "serde",
  "yaml-rust",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap 2.2.6",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -11495,6 +11513,12 @@ name = "unindent"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1766d682d402817b5ac4490b3c3002d91dfa0d22812f341609f97b08757359c"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

@@ -1,6 +1,6 @@
 use collab_ui::collab_panel;
 use gpui::{Menu, MenuItem, OsAction};
-use rust_i18n::t;
+use i18n::t;
 use terminal_view::terminal_panel;
 
 pub fn app_menus() -> Vec<Menu<'static>> {

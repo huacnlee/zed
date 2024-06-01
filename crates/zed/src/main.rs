@@ -55,7 +55,7 @@ use crate::zed::inline_completion_registry;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-rust_i18n::i18n!(backend = i18n::Backend);
+i18n::init!();
 
 fn fail_to_launch(e: anyhow::Error) {
     App::new().run(move |cx| {
@@ -127,6 +127,8 @@ fn init_ui(app_state: Arc<AppState>, cx: &mut AppContext) -> Result<()> {
     if let Err(err) = cx.can_open_windows() {
         return Err(err);
     }
+
+    i18n::set_locale("zh-CN");
 
     SystemAppearance::init(cx);
     load_embedded_fonts(cx);
