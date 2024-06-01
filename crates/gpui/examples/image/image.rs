@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -68,7 +69,7 @@ fn main() {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![Menu {
-            name: "Image",
+            name: Cow::from("Image"),
             items: vec![MenuItem::action("Quit", Quit)],
         }]);
 

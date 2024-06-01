@@ -55,6 +55,8 @@ use crate::zed::inline_completion_registry;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+rust_i18n::i18n!(backend = i18n::Backend);
+
 fn fail_to_launch(e: anyhow::Error) {
     App::new().run(move |cx| {
         let window = cx.open_window(gpui::WindowOptions::default(), |cx| cx.new_view(|_| gpui::Empty));

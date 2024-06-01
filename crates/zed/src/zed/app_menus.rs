@@ -1,5 +1,6 @@
 use collab_ui::collab_panel;
 use gpui::{Menu, MenuItem, OsAction};
+use rust_i18n::t;
 use terminal_view::terminal_panel;
 
 pub fn app_menus() -> Vec<Menu<'static>> {
@@ -7,13 +8,13 @@ pub fn app_menus() -> Vec<Menu<'static>> {
 
     vec![
         Menu {
-            name: "Zed",
+            name: t!("Zed"),
             items: vec![
-                MenuItem::action("About Zed…", super::About),
-                MenuItem::action("Check for Updates", auto_update::Check),
+                MenuItem::action(t!("About Zed…"), super::About),
+                MenuItem::action(t!("Check for Updates"), auto_update::Check),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu {
-                    name: "Preferences",
+                    name: t!("Preferences"),
                     items: vec![
                         MenuItem::action("Open Settings", super::OpenSettings),
                         MenuItem::action("Open Key Bindings", super::OpenKeymap),
@@ -33,14 +34,14 @@ pub fn app_menus() -> Vec<Menu<'static>> {
             ],
         },
         Menu {
-            name: "File",
+            name: t!("File"),
             items: vec![
                 MenuItem::action("New", workspace::NewFile),
                 MenuItem::action("New Window", workspace::NewWindow),
                 MenuItem::separator(),
                 MenuItem::action("Open…", workspace::Open),
                 MenuItem::action(
-                    "Open Recent...",
+                    t!("Open Recent..."),
                     recent_projects::OpenRecent {
                         create_new_window: true,
                     },
@@ -51,36 +52,36 @@ pub fn app_menus() -> Vec<Menu<'static>> {
                 MenuItem::action("Save As…", workspace::SaveAs),
                 MenuItem::action("Save All", workspace::SaveAll { save_intent: None }),
                 MenuItem::action(
-                    "Close Editor",
+                    t!("Close Editor"),
                     workspace::CloseActiveItem { save_intent: None },
                 ),
-                MenuItem::action("Close Window", workspace::CloseWindow),
+                MenuItem::action(t!("Close Window"), workspace::CloseWindow),
             ],
         },
         Menu {
-            name: "Edit",
+            name: t!("Edit"),
             items: vec![
-                MenuItem::os_action("Undo", editor::actions::Undo, OsAction::Undo),
-                MenuItem::os_action("Redo", editor::actions::Redo, OsAction::Redo),
+                MenuItem::os_action(t!("Undo"), editor::actions::Undo, OsAction::Undo),
+                MenuItem::os_action(t!("Redo"), editor::actions::Redo, OsAction::Redo),
                 MenuItem::separator(),
-                MenuItem::os_action("Cut", editor::actions::Cut, OsAction::Cut),
-                MenuItem::os_action("Copy", editor::actions::Copy, OsAction::Copy),
-                MenuItem::os_action("Paste", editor::actions::Paste, OsAction::Paste),
+                MenuItem::os_action(t!("Cut"), editor::actions::Cut, OsAction::Cut),
+                MenuItem::os_action(t!("Copy"), editor::actions::Copy, OsAction::Copy),
+                MenuItem::os_action(t!("Paste"), editor::actions::Paste, OsAction::Paste),
                 MenuItem::separator(),
-                MenuItem::action("Find", search::buffer_search::Deploy::find()),
-                MenuItem::action("Find In Project", workspace::DeploySearch::find()),
+                MenuItem::action(t!("Find"), search::buffer_search::Deploy::find()),
+                MenuItem::action(t!("Find In Project"), workspace::DeploySearch::find()),
                 MenuItem::separator(),
                 MenuItem::action(
-                    "Toggle Line Comment",
+                    t!("Toggle Line Comment"),
                     editor::actions::ToggleComments::default(),
                 ),
             ],
         },
         Menu {
-            name: "Selection",
+            name: t!("Selection"),
             items: vec![
                 MenuItem::os_action(
-                    "Select All",
+                    t!("Select All"),
                     editor::actions::SelectAll,
                     OsAction::SelectAll,
                 ),
@@ -102,7 +103,7 @@ pub fn app_menus() -> Vec<Menu<'static>> {
             ],
         },
         Menu {
-            name: "View",
+            name: t!("View"),
             items: vec![
                 MenuItem::action("Zoom In", super::IncreaseBufferFontSize),
                 MenuItem::action("Zoom Out", super::DecreaseBufferFontSize),
@@ -113,7 +114,7 @@ pub fn app_menus() -> Vec<Menu<'static>> {
                 MenuItem::action("Toggle Bottom Dock", workspace::ToggleBottomDock),
                 MenuItem::action("Close All Docks", workspace::CloseAllDocks),
                 MenuItem::submenu(Menu {
-                    name: "Editor Layout",
+                    name: t!("Editor Layout"),
                     items: vec![
                         MenuItem::action("Split Up", workspace::SplitUp),
                         MenuItem::action("Split Down", workspace::SplitDown),
@@ -131,7 +132,7 @@ pub fn app_menus() -> Vec<Menu<'static>> {
             ],
         },
         Menu {
-            name: "Go",
+            name: t!("Go"),
             items: vec![
                 MenuItem::action("Back", workspace::GoBack),
                 MenuItem::action("Forward", workspace::GoForward),
@@ -152,7 +153,7 @@ pub fn app_menus() -> Vec<Menu<'static>> {
             ],
         },
         Menu {
-            name: "Window",
+            name: t!("Window"),
             items: vec![
                 MenuItem::action("Minimize", super::Minimize),
                 MenuItem::action("Zoom", super::Zoom),
@@ -160,7 +161,7 @@ pub fn app_menus() -> Vec<Menu<'static>> {
             ],
         },
         Menu {
-            name: "Help",
+            name: t!("Help"),
             items: vec![
                 MenuItem::action("View Telemetry", super::OpenTelemetryLog),
                 MenuItem::action("View Dependency Licenses", super::OpenLicenses),

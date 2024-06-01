@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -25,12 +26,8 @@ fn main() {
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
 
         cx.set_menus(vec![Menu {
-            name: "Zed",
-            items: vec![MenuItem::Action {
-                name: "Quit",
-                action: Box::new(Quit),
-                os_action: None,
-            }],
+            name: Cow::from("Zed"),
+            items: vec![MenuItem::action("Quit", Quit)],
         }]);
 
         let live_kit_url = std::env::var("LIVE_KIT_URL").unwrap_or("http://localhost:7880".into());
