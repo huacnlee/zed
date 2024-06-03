@@ -132,7 +132,7 @@ fn init_ui(app_state: Arc<AppState>, cx: &mut AppContext) -> Result<()> {
 
     SystemAppearance::init(cx);
     load_embedded_fonts(cx);
-
+    i18n::init(cx);
     theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
     app_state.languages.set_theme(cx.theme().clone());
     command_palette::init(cx);

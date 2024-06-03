@@ -1,5 +1,11 @@
+use ::settings::Settings;
+use ::settings::SettingsStore;
+use gpui::AppContext;
+use settings::I18nSettings;
 use std::collections::HashMap;
 use util::ResultExt;
+
+mod settings;
 
 rust_i18n::i18n!(fallback = "en");
 
@@ -23,12 +29,10 @@ impl Backend {
                     .to_string_lossy()
                     .to_string();
 
-                dbg!(f.clone());
                 if let Some(asset) = assets::Assets::get(&f) {
                     if let Some(data) =
                         serde_yaml::from_slice::<HashMap<String, String>>(&asset.data).log_err()
                     {
-                        dbg!("install trs", locale.clone());
                         trs.insert(locale, data);
                     }
                 }
@@ -62,5 +66,20 @@ macro_rules! init {
     };
 }
 
+pub fn init(cx: &mut AppContext) {
+    settings::I18nSettings::register(cx);
+
+    let previus_locale = I18nSettings::get_global(cx).locale.clone();
+    cx.observe_global::<SettingsStore>(move |cx| {
+        let locale = I18nSettings::get_global(cx).locale.clone();
+        if previus_locale != locale {
+            dbg!("locale changed to {}", locale);
+            // TODO: Dispatch Notification to tell use to restart Zed to apply new locale
+        }
+    })
+    .detach();
+}
+
+pub use rust_i18n::available_locales;
 pub use rust_i18n::set_locale;
 pub use rust_i18n::t;

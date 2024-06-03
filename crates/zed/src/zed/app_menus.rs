@@ -36,10 +36,10 @@ pub fn app_menus() -> Vec<Menu<'static>> {
         Menu {
             name: t!("File"),
             items: vec![
-                MenuItem::action("New", workspace::NewFile),
-                MenuItem::action("New Window", workspace::NewWindow),
+                MenuItem::action(t!("New"), workspace::NewFile),
+                MenuItem::action(t!("New Window"), workspace::NewWindow),
                 MenuItem::separator(),
-                MenuItem::action("Open…", workspace::Open),
+                MenuItem::action(t!("Open…"), workspace::Open),
                 MenuItem::action(
                     t!("Open Recent..."),
                     recent_projects::OpenRecent {
@@ -47,10 +47,10 @@ pub fn app_menus() -> Vec<Menu<'static>> {
                     },
                 ),
                 MenuItem::separator(),
-                MenuItem::action("Add Folder to Project…", workspace::AddFolderToProject),
-                MenuItem::action("Save", workspace::Save { save_intent: None }),
-                MenuItem::action("Save As…", workspace::SaveAs),
-                MenuItem::action("Save All", workspace::SaveAll { save_intent: None }),
+                MenuItem::action(t!("Add Folder to Project…"), workspace::AddFolderToProject),
+                MenuItem::action(t!("Save"), workspace::Save { save_intent: None }),
+                MenuItem::action(t!("Save As…"), workspace::SaveAs),
+                MenuItem::action(t!("Save All"), workspace::SaveAll { save_intent: None }),
                 MenuItem::action(
                     t!("Close Editor"),
                     workspace::CloseActiveItem { save_intent: None },

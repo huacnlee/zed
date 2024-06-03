@@ -207,7 +207,7 @@ impl MacPlatform {
 
         for menu_config in menus {
             let menu = NSMenu::new(nil).autorelease();
-            menu.setTitle_(ns_string(menu_config.name));
+            menu.setTitle_(ns_string(&menu_config.name));
             menu.setDelegate_(delegate);
 
             for item_config in menu_config.items {
@@ -311,7 +311,7 @@ impl MacPlatform {
 
                         item = NSMenuItem::alloc(nil)
                             .initWithTitle_action_keyEquivalent_(
-                                ns_string(name),
+                                ns_string(&name),
                                 selector,
                                 ns_string(key_to_native(&keystroke.key).as_ref()),
                             )
@@ -342,7 +342,7 @@ impl MacPlatform {
                 } else {
                     item = NSMenuItem::alloc(nil)
                         .initWithTitle_action_keyEquivalent_(
-                            ns_string(name),
+                            ns_string(&name),
                             selector,
                             ns_string(""),
                         )
@@ -362,7 +362,7 @@ impl MacPlatform {
                     submenu.addItem_(Self::create_menu_item(item, delegate, actions, keymap));
                 }
                 item.setSubmenu_(submenu);
-                item.setTitle_(ns_string(name));
+                item.setTitle_(ns_string(&name));
                 item
             }
         }

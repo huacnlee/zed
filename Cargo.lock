@@ -5232,9 +5232,14 @@ dependencies = [
 name = "i18n"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "assets",
+ "gpui",
  "rust-i18n",
+ "schemars",
+ "serde",
  "serde_yaml 0.9.34+deprecated",
+ "settings",
  "util",
 ]
 
