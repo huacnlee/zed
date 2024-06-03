@@ -7,6 +7,7 @@ use gpui::{
     InteractiveElement, IntoElement, Model, ParentElement, Path, Render,
     StatefulInteractiveElement, Styled, Subscription, ViewContext, VisualContext, WeakView,
 };
+use i18n::t;
 use project::{Project, RepositoryEntry};
 use recent_projects::RecentProjects;
 use rpc::proto::{self, DevServerStatus};
@@ -701,7 +702,7 @@ impl CollabTitlebarItem {
 
     pub fn render_sign_in_button(&mut self, _: &mut ViewContext<Self>) -> Button {
         let client = self.client.clone();
-        Button::new("sign_in", "Sign in")
+        Button::new("sign_in", t!("Sign in"))
             .label_size(LabelSize::Small)
             .on_click(move |_, cx| {
                 let client = client.clone();
@@ -720,11 +721,14 @@ impl CollabTitlebarItem {
             popover_menu("user-menu")
                 .menu(|cx| {
                     ContextMenu::build(cx, |menu, _| {
-                        menu.action("Settings", zed_actions::OpenSettings.boxed_clone())
-                            .action("Extensions", extensions_ui::Extensions.boxed_clone())
-                            .action("Themes…", theme_selector::Toggle::default().boxed_clone())
+                        menu.action(t!("Settings"), zed_actions::OpenSettings.boxed_clone())
+                            .action(t!("Extensions"), extensions_ui::Extensions.boxed_clone())
+                            .action(
+                                t!("Themes…"),
+                                theme_selector::Toggle::default().boxed_clone(),
+                            )
                             .separator()
-                            .action("Sign Out", client::SignOut.boxed_clone())
+                            .action(t!("Sign Out"), client::SignOut.boxed_clone())
                     })
                     .into()
                 })
@@ -748,9 +752,12 @@ impl CollabTitlebarItem {
             popover_menu("user-menu")
                 .menu(|cx| {
                     ContextMenu::build(cx, |menu, _| {
-                        menu.action("Settings", zed_actions::OpenSettings.boxed_clone())
-                            .action("Extensions", extensions_ui::Extensions.boxed_clone())
-                            .action("Themes…", theme_selector::Toggle::default().boxed_clone())
+                        menu.action(t!("Settings"), zed_actions::OpenSettings.boxed_clone())
+                            .action(t!("Extensions"), extensions_ui::Extensions.boxed_clone())
+                            .action(
+                                t!("Themes…"),
+                                theme_selector::Toggle::default().boxed_clone(),
+                            )
                     })
                     .into()
                 })
@@ -764,7 +771,7 @@ impl CollabTitlebarItem {
                             ),
                         )
                         .style(ButtonStyle::Subtle)
-                        .tooltip(move |cx| Tooltip::text("Toggle User Menu", cx)),
+                        .tooltip(move |cx| Tooltip::text(t!("Toggle User Menu"), cx)),
                 )
         }
     }

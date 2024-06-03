@@ -1,4 +1,5 @@
 use gpui::*;
+use std::borrow::Cow;
 
 struct SetMenus;
 
@@ -24,7 +25,7 @@ fn main() {
         cx.on_action(quit);
         // Add menu items
         cx.set_menus(vec![Menu {
-            name: "set_menus",
+            name: Cow::from("set_menus"),
             items: vec![MenuItem::action("Quit", Quit)],
         }]);
         cx.open_window(WindowOptions::default(), |cx| {

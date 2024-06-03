@@ -55,6 +55,8 @@ use crate::zed::inline_completion_registry;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+i18n::init!();
+
 fn fail_to_launch(e: anyhow::Error) {
     App::new().run(move |cx| {
         let window = cx.open_window(gpui::WindowOptions::default(), |cx| cx.new_view(|_| gpui::Empty));
@@ -126,9 +128,11 @@ fn init_ui(app_state: Arc<AppState>, cx: &mut AppContext) -> Result<()> {
         return Err(err);
     }
 
+    i18n::set_locale("zh-CN");
+
     SystemAppearance::init(cx);
     load_embedded_fonts(cx);
-
+    i18n::init(cx);
     theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
     app_state.languages.set_theme(cx.theme().clone());
     command_palette::init(cx);

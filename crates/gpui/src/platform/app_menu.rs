@@ -6,7 +6,7 @@ use util::ResultExt;
 /// A menu of the application, either a main menu or a submenu
 pub struct Menu<'a> {
     /// The name of the menu
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
 
     /// The items in the menu
     pub items: Vec<MenuItem<'a>>,
@@ -33,7 +33,7 @@ pub enum MenuItem<'a> {
     /// An action that can be performed
     Action {
         /// The name of this menu item
-        name: &'a str,
+        name: Cow<'a, str>,
 
         /// the action to perform when this menu item is selected
         action: Box<dyn Action>,
@@ -56,18 +56,24 @@ impl<'a> MenuItem<'a> {
     }
 
     /// Creates a new menu item that invokes an action
-    pub fn action(name: &'a str, action: impl Action) -> Self {
+    pub fn action<S>(name: S, action: impl Action) -> Self
+    where
+        S: Into<Cow<'a, str>>,
+    {
         Self::Action {
-            name,
+            name: name.into(),
             action: Box::new(action),
             os_action: None,
         }
     }
 
     /// Creates a new menu item that invokes an action and has an OS action
-    pub fn os_action(name: &'a str, action: impl Action, os_action: OsAction) -> Self {
+    pub fn os_action<S>(name: S, action: impl Action, os_action: OsAction) -> Self
+    where
+        S: Into<Cow<'a, str>>,
+    {
         Self::Action {
-            name,
+            name: name.into(),
             action: Box::new(action),
             os_action: Some(os_action),
         }
