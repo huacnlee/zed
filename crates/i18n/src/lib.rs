@@ -1,22 +1,23 @@
 use ::settings::Settings;
 use ::settings::SettingsStore;
 use gpui::AppContext;
+use once_cell::sync::Lazy;
 use settings::I18nSettings;
 use std::collections::HashMap;
 use util::ResultExt;
 
 mod settings;
 
-rust_i18n::i18n!(fallback = "en");
+static BACKEND_DATA: Lazy<BackendData> = Lazy::new(BackendData::init);
 
 type Translations = HashMap<String, HashMap<String, String>>;
 
-pub struct Backend {
+pub struct BackendData {
     trs: Translations,
 }
 
-impl Backend {
-    pub fn reload() -> Self {
+impl BackendData {
+    pub fn init() -> Self {
         let mut trs = Translations::default();
 
         // Load all translations from assets/locales/*.yml
@@ -42,15 +43,22 @@ impl Backend {
 
         Self { trs }
     }
+
+    pub fn available_locales(&self) -> impl Iterator<Item = &str> {
+        self.trs.keys().map(|s| s.as_str())
+    }
 }
+
+#[derive(Default)]
+pub struct Backend {}
 
 impl rust_i18n::Backend for Backend {
     fn available_locales(&self) -> Vec<&str> {
-        self.trs.keys().map(|s| s.as_str()).collect()
+        BACKEND_DATA.trs.keys().map(|s| s.as_str()).collect()
     }
 
-    fn translate<'a>(&'a self, locale: &str, key: &str) -> Option<&str> {
-        if let Some(trs) = self.trs.get(locale) {
+    fn translate(&self, locale: &str, key: &str) -> Option<&str> {
+        if let Some(trs) = BACKEND_DATA.trs.get(locale) {
             trs.get(key).map(|s| s.as_str())
         } else {
             None
@@ -62,7 +70,7 @@ impl rust_i18n::Backend for Backend {
 #[macro_export]
 macro_rules! init {
     () => {
-        rust_i18n::i18n!(fallback = "en", backend = i18n::Backend::reload());
+        rust_i18n::i18n!(fallback = "en", backend = i18n::Backend::default());
     };
 }
 

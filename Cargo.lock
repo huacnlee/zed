@@ -5235,6 +5235,7 @@ dependencies = [
  "anyhow",
  "assets",
  "gpui",
+ "once_cell",
  "rust-i18n",
  "schemars",
  "serde",

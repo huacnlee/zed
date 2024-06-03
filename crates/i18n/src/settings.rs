@@ -15,7 +15,7 @@ impl I18nSettings {
     pub fn switch_locale(&mut self, locale: &str, _cx: &mut AppContext) -> Option<String> {
         let mut new_locale = None;
 
-        if crate::available_locales!().iter().any(|l| *l == locale) {
+        if crate::BACKEND_DATA.available_locales().any(|l| l == locale) {
             self.locale = locale.to_string();
             new_locale = Some(locale.to_string());
         }
@@ -36,7 +36,7 @@ impl settings::Settings for I18nSettings {
 
     type FileContent = I18nSettingsContent;
 
-    fn load(sources: SettingsSources<Self::FileContent>, cx: &mut AppContext) -> Result<Self> {
+    fn load(sources: SettingsSources<Self::FileContent>, _cx: &mut AppContext) -> Result<Self> {
         let defaults = sources.default;
         let mut this = Self {
             locale: defaults.locale.clone().unwrap(),
