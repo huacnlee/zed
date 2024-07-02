@@ -25,9 +25,11 @@ linkify.workspace = true
 log.workspace = true
 pretty_assertions.workspace = true
 pulldown-cmark.workspace = true
+settings.workspace = true
 theme.workspace = true
 ui.workspace = true
 workspace.workspace = true
+wry = "0.41.0"
 
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }
