@@ -2446,10 +2446,17 @@ impl Render for ProjectPanel {
                                 move |this, range, cx| {
                                     let mut items = Vec::new();
                                     this.for_each_visible_entry(range, cx, |id, details, cx| {
+                                        let item = this.render_entry(id, details, cx);
+
                                         items.push(
                                             div().w_full().child(
-                                                this.render_entry(id, details, cx)
-                                                    .left(horizontal_scroll_handle.offset().x),
+                                                item.left(
+                                                    horizontal_scroll_handle
+                                                        .offset()
+                                                        .x
+                                                        .min(px(0.))
+                                                        .max(px(-200.)),
+                                                ),
                                             ),
                                         );
                                     });
@@ -2460,14 +2467,11 @@ impl Render for ProjectPanel {
                             .with_sizing_behavior(ListSizingBehavior::Infer)
                             .track_scroll(self.scroll_handle.clone()),
                         )
-                        .child(
-                            ScrollableMask::new(
-                                cx.view().clone(),
-                                gpui::ScrollAxis::Horizontal,
-                                &self.horizontal_scroll_handle,
-                            )
-                            .debug(),
-                        ),
+                        .child(ScrollableMask::new(
+                            cx.view().clone(),
+                            gpui::ScrollAxis::Horizontal,
+                            &self.horizontal_scroll_handle,
+                        )),
                 )
                 .children(self.render_scrollbar(items_count, cx))
                 .children(self.context_menu.as_ref().map(|(menu, position, _)| {

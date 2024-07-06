@@ -120,6 +120,7 @@ impl Element for ScrollableMask {
             cx.on_mouse_event({
                 let mouse_position = cx.mouse_position();
                 let scroll_handle = self.scroll_handle.clone();
+                let old_offset = scroll_handle.offset();
                 let view_id = self.view.entity_id();
                 let is_horizontal = self.axis == ScrollAxis::Horizontal;
 
@@ -132,8 +133,6 @@ impl Element for ScrollableMask {
                             let mut offset = scroll_handle.offset();
                             offset.x += delta.x;
                             scroll_handle.set_offset(offset);
-                            cx.notify(view_id);
-                            cx.stop_propagation();
                         }
 
                         if !is_horizontal && !delta.y.is_zero() {
@@ -141,6 +140,9 @@ impl Element for ScrollableMask {
                             let mut offset = scroll_handle.offset();
                             offset.y += delta.y;
                             scroll_handle.set_offset(offset);
+                        }
+
+                        if old_offset != scroll_handle.offset() {
                             cx.notify(view_id);
                             cx.stop_propagation();
                         }
