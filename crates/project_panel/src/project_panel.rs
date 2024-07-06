@@ -20,8 +20,8 @@ use gpui::{
     AppContext, AssetSource, AsyncWindowContext, ClipboardItem, DismissEvent, Div, DragMoveEvent,
     EventEmitter, ExternalPaths, FocusHandle, FocusableView, InteractiveElement, KeyContext,
     ListSizingBehavior, Model, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
-    PromptLevel, Render, Stateful, Styled, Subscription, Task, UniformListScrollHandle, View,
-    ViewContext, VisualContext as _, WeakView, WindowContext,
+    PromptLevel, Render, ScrollHandle, ScrollableMask, Stateful, Styled, Subscription, Task,
+    UniformListScrollHandle, View, ViewContext, VisualContext as _, WeakView, WindowContext,
 };
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrev};
 use project::{Entry, EntryKind, Fs, Project, ProjectEntryId, ProjectPath, Worktree, WorktreeId};
@@ -54,6 +54,7 @@ pub struct ProjectPanel {
     project: Model<Project>,
     fs: Arc<dyn Fs>,
     scroll_handle: UniformListScrollHandle,
+    horizontal_scroll_handle: ScrollHandle,
     focus_handle: FocusHandle,
     visible_entries: Vec<(WorktreeId, Vec<Entry>, OnceCell<HashSet<Arc<Path>>>)>,
     last_worktree_root_id: Option<ProjectEntryId>,
@@ -271,6 +272,7 @@ impl ProjectPanel {
                 project: project.clone(),
                 fs: workspace.app_state().fs.clone(),
                 scroll_handle: UniformListScrollHandle::new(),
+                horizontal_scroll_handle: ScrollHandle::new(),
                 focus_handle,
                 visible_entries: Default::default(),
                 last_worktree_root_id: Default::default(),
@@ -2369,6 +2371,7 @@ impl Render for ProjectPanel {
     fn render(&mut self, cx: &mut gpui::ViewContext<Self>) -> impl IntoElement {
         let has_worktree = self.visible_entries.len() != 0;
         let project = self.project.read(cx);
+        let horizontal_scroll_handle = self.horizontal_scroll_handle.clone();
 
         if has_worktree {
             let items_count = self
@@ -2436,18 +2439,35 @@ impl Render for ProjectPanel {
                 )
                 .track_focus(&self.focus_handle)
                 .child(
-                    uniform_list(cx.view().clone(), "entries", items_count, {
-                        |this, range, cx| {
-                            let mut items = Vec::new();
-                            this.for_each_visible_entry(range, cx, |id, details, cx| {
-                                items.push(this.render_entry(id, details, cx));
-                            });
-                            items
-                        }
-                    })
-                    .size_full()
-                    .with_sizing_behavior(ListSizingBehavior::Infer)
-                    .track_scroll(self.scroll_handle.clone()),
+                    div()
+                        .size_full()
+                        .child(
+                            uniform_list(cx.view().clone(), "entries", items_count, {
+                                move |this, range, cx| {
+                                    let mut items = Vec::new();
+                                    this.for_each_visible_entry(range, cx, |id, details, cx| {
+                                        items.push(
+                                            div().w_full().child(
+                                                this.render_entry(id, details, cx)
+                                                    .left(horizontal_scroll_handle.offset().x),
+                                            ),
+                                        );
+                                    });
+                                    items
+                                }
+                            })
+                            .size_full()
+                            .with_sizing_behavior(ListSizingBehavior::Infer)
+                            .track_scroll(self.scroll_handle.clone()),
+                        )
+                        .child(
+                            ScrollableMask::new(
+                                cx.view().clone(),
+                                gpui::ScrollAxis::Horizontal,
+                                &self.horizontal_scroll_handle,
+                            )
+                            .debug(),
+                        ),
                 )
                 .children(self.render_scrollbar(items_count, cx))
                 .children(self.context_menu.as_ref().map(|(menu, position, _)| {
