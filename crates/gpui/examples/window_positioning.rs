@@ -43,9 +43,8 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     // Specify the display_id to ensure the window is created on the correct screen
                     display_id: Some(screen.id()),
-
                     titlebar: None,
-                    window_background: WindowBackgroundAppearance::default(),
+                    window_background: WindowBackgroundAppearance::Transparent,
                     focus: false,
                     show: true,
                     kind: WindowKind::PopUp,
