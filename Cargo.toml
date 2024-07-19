@@ -44,6 +44,7 @@ members = [
     "crates/headless",
     "crates/html_to_markdown",
     "crates/http",
+    "crates/i18n",
     "crates/image_viewer",
     "crates/indexed_docs",
     "crates/inline_completion_button",
@@ -196,6 +197,7 @@ gpui_macros = { path = "crates/gpui_macros" }
 headless = { path = "crates/headless" }
 html_to_markdown = { path = "crates/html_to_markdown" }
 http = { path = "crates/http" }
+i18n = { path = "crates/i18n" }
 image_viewer = { path = "crates/image_viewer" }
 indexed_docs = { path = "crates/indexed_docs" }
 inline_completion_button = { path = "crates/inline_completion_button" }
@@ -350,6 +352,7 @@ runtimelib = { version = "0.12", default-features = false, features = [
 ] }
 rusqlite = { version = "0.29.0", features = ["blob", "array", "modern_sqlite"] }
 rust-embed = { version = "8.4", features = ["include-exclude"] }
+rust-i18n = "3"
 schemars = "0.8"
 semver = "1.0"
 serde = { version = "1.0", features = ["derive", "rc"] }

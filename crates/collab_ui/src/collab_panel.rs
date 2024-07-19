@@ -18,6 +18,7 @@ use gpui::{
     Render, SharedString, Styled, Subscription, Task, TextStyle, View, ViewContext, VisualContext,
     WeakView, WhiteSpace,
 };
+use i18n::t;
 use menu::{Cancel, Confirm, SecondaryConfirm, SelectNext, SelectPrev};
 use project::{Fs, Project};
 use rpc::{
@@ -2057,7 +2058,7 @@ impl CollabPanel {
                 v_flex()
                     .gap_2()
                     .child(
-                        Button::new("sign_in", "Sign in")
+                        Button::new("sign_in", t!("Sign in"))
                             .icon_color(Color::Muted)
                             .icon(IconName::Github)
                             .icon_position(IconPosition::Start)
@@ -2076,7 +2077,7 @@ impl CollabPanel {
                     )
                     .child(
                         div().flex().w_full().items_center().child(
-                            Label::new("Sign in to enable collaboration.")
+                            Label::new(t!("Sign in to enable collaboration."))
                                 .color(Color::Muted)
                                 .size(LabelSize::Small),
                         ),
