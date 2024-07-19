@@ -13,6 +13,7 @@ use gpui::{
     percentage, Animation, AnimationExt, AnyElement, AppContext, DismissEvent, EventEmitter,
     FocusHandle, FocusableView, Model, ScrollHandle, Transformation, View, ViewContext,
 };
+use i18n::t;
 use markdown::Markdown;
 use markdown::MarkdownStyle;
 use rpc::proto::RegenerateDevServerTokenResponse;
@@ -967,11 +968,11 @@ impl DevServerProjects {
             .when(is_signed_out, |modal| {
                 modal
                     .section(Section::new().child(v_flex().mb_4().child(Label::new(
-                        "You are not currently signed in to Zed. Currently the remote development featuers are only available to signed in users. Please sign in to continue.",
+                        t!("You are not currently signed in to Zed. Currently the remote development featuers are only available to signed in users. Please sign in to continue."),
                     ))))
                     .footer(
                         ModalFooter::new().end_slot(
-                            Button::new("sign_in", "Sign in")
+                            Button::new("sign_in", t!("Sign In"))
                                 .icon(IconName::Github)
                                 .icon_position(IconPosition::Start)
                                 .style(ButtonStyle::Filled)
@@ -995,14 +996,14 @@ impl DevServerProjects {
                     Section::new().child(
                         div().mb_4().child(
                             List::new()
-                                .empty_message("No dev servers registered.")
+                                .empty_message(t!("No dev servers registered."))
                                 .header(Some(
-                                    ListHeader::new("Dev Servers").end_slot(
-                                        Button::new("register-dev-server-button", "New Server")
+                                    ListHeader::new(t!("Dev Servers")).end_slot(
+                                        Button::new("register-dev-server-button", t!("New Server"))
                                             .icon(IconName::Plus)
                                             .icon_position(IconPosition::Start)
                                             .tooltip(|cx| {
-                                                Tooltip::text("Register a new dev server", cx)
+                                                Tooltip::text(t!("Register a new dev server"), cx)
                                             })
                                             .on_click(cx.listener(|this, _, cx| {
                                                 this.mode = Mode::CreateDevServer(

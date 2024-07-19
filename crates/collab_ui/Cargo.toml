@@ -41,6 +41,7 @@ emojis.workspace = true
 futures.workspace = true
 fuzzy.workspace = true
 gpui.workspace = true
+i18n.workspace = true
 language.workspace = true
 lazy_static.workspace = true
 menu.workspace = true

@@ -12,6 +12,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Task, View, ViewContext, VisualContext, WeakView,
     WindowContext,
 };
+use i18n::t;
 use notifications::{NotificationEntry, NotificationEvent, NotificationStore};
 use project::Fs;
 use rpc::proto;
@@ -591,7 +592,7 @@ impl Render for NotificationPanel {
                     .h(rems(ui::Tab::CONTAINER_HEIGHT_IN_REMS))
                     .border_b_1()
                     .border_color(cx.theme().colors().border)
-                    .child(Label::new("Notifications"))
+                    .child(Label::new(t!("Notifications")))
                     .child(Icon::new(IconName::Envelope)),
             )
             .map(|this| {
@@ -601,7 +602,7 @@ impl Render for NotificationPanel {
                             .gap_2()
                             .p_4()
                             .child(
-                                Button::new("sign_in_prompt_button", "Sign in")
+                                Button::new("sign_in_prompt_button", t!("Sign In"))
                                     .icon_color(Color::Muted)
                                     .icon(IconName::Github)
                                     .icon_position(IconPosition::Start)

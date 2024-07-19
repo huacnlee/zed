@@ -1,0 +1,108 @@
+About Zed…: 关于 Zed…
+Add Cursor Above: 在上方添加光标
+Add Cursor Below: 在下方添加光标
+Add Folder to Project…: 添加文件夹到项目…
+Open a new Project…: 打开新项目…
+Open Recent Projects…: 打开最近的项目…
+Back: 后退
+Check for Updates: 检查更新
+Close All Docks: 关闭所有面板
+Close Editor: 关闭编辑器
+Close Window: 关闭窗口
+Collab Panel: 协作面板
+Open Application Menu: 打开应用菜单
+Command Palette…: 命令面板…
+Copy: 复制
+Cut: 剪切
+Diagnostics: 诊断信息
+Documentation: 文档
+Duplicate Selection: 复制已选内容
+Edit: 编辑
+Editor Layout: 编辑器布局
+Expand Selection: 扩展选择
+Extensions: 扩展
+File: 文件
+Find All References: 查找所有引用
+Find In Project: 在项目中查找
+Find: 查找
+Forward: 前进
+Give Feedback…: 提交反馈…
+Go to Definition: 转到定义
+Go to File…: 转到文件…
+Go to Line/Column…: 转到行/列…
+Go to Symbol in Editor…: 转到符号…
+Go to Type Definition: 转到类型定义
+Go: 转到
+Help: 帮助
+Hide Others: 隐藏其他
+Hide Zed: 隐藏 Zed
+Install CLI: 安装 CLI 工具
+Minimize: 最小化
+Move Line Down: 向下移动行
+Move Line Up: 向上移动行
+New Window: 新建窗口
+New: 新建
+Next Problem: 下一个问题
+Open Default Key Bindings: 默认按键绑定
+Open Default Settings: 默认设置
+Open Key Bindings: 按键绑定
+Open Local Settings: 打开工作区设置
+Open Recent…: 打开最近…
+Open Settings: 用户设置
+Open…: 打开…
+Outline Panel: 大纲面板
+Paste: 粘贴
+Preferences: 首选项
+Previous Problem:
+Project Panel: 项目面板
+Quit: 退出
+Redo: 重做
+Reset Zoom: 重置缩放
+Save All: 全部保存
+Save As…: 另存为…
+Save: 保存
+Select All: 全选
+Select Next Occurrence: 选择下一个相同文本
+Select Theme…: 选择主题…
+Selection: 选择
+Settings: 设置
+Show All: 显示全部
+Show Welcome: 显示欢迎页
+Shrink Selection: 缩小选择
+Sign in: 登录
+Sign Out: 登出
+Split Down: 向下拆分
+Split Left: 向左拆分
+Split Right: 向右拆分
+Split Up: 向上拆分
+Terminal Panel: 终端面板
+Themes…: 主题…
+Toggle Bottom Dock: 开/关底部面板
+Toggle Left Dock: 开关左侧面板
+Toggle Line Comment: 切换行注释
+Toggle Right Dock: 开关右侧面板
+Toggle User Menu: 切换用户菜单
+Undo: 撤销
+View Dependency Licenses: 查看三方库协议
+View Telemetry: 查看遥测日志
+View: 视图
+Window: 窗口
+Zoom In: 放大
+Zoom Out: 缩小
+Zoom: 缩放
+Sign In: 登录
+Sign in to enable collaboration.: 登录以启用协作
+Generate and analyze code with language models. You can dialog with the assistant in this panel or transform code inline.: 使用语言模型生成和分析代码。您可以在此面板中与助手对话，或者在行内转换代码。
+Notifications: 通知
+"Work with your team in realtime with collaborative editing, voice, shared notes and more.": "通过协作编辑、语音、共享笔记等功能与团队实时合作。"
+You are not currently signed in to Zed. Currently the remote development featuers are only available to signed in users. Please sign in to continue.: 您当前未登录 Zed。目前远程开发功能仅对登录用户开放。请登录以继续。
+"No dev servers registered.": "未注册开发服务器。"
+"Dev Servers": "开发服务器"
+"New Server": 新增服务器
+"Register a new dev server": 注册新的开发服务器
+Key Bindings: 按键绑定
+Workspace: 工作区
+Open Command Palette: 打开命令面板
+Buffer Font Size: 编辑区字体尺寸
+UI Font Size: 界面字体尺寸
+Project: 项目

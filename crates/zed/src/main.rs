@@ -192,6 +192,8 @@ fn init_ui(app_state: Arc<AppState>, cx: &mut AppContext) -> Result<()> {
         }
     };
 
+    i18n::init(cx);
+
     load_embedded_fonts(cx);
 
     #[cfg(target_os = "linux")]

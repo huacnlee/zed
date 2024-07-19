@@ -1,0 +1,23 @@
+[package]
+name = "i18n"
+version = "0.1.0"
+description = "Provides I18n backend for other crates in Zed workspace."
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+assets.workspace = true
+gpui.workspace = true
+util.workspace = true
+settings.workspace = true
+serde.workspace = true
+schemars.workspace = true
+once_cell.workspace = true
+
+rust-i18n = "3"
+serde_yml = "0.0.10"
