@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use client::{proto, Client};
 use futures::{future::BoxFuture, stream::BoxStream, FutureExt, StreamExt, TryFutureExt};
 use gpui::{AnyView, AppContext, Task};
+use i18n::t;
 use std::{future, sync::Arc};
 use strum::IntoEnumIterator;
 use ui::prelude::*;
@@ -178,13 +179,11 @@ struct AuthenticationPrompt;
 
 impl Render for AuthenticationPrompt {
     fn render(&mut self, _cx: &mut ViewContext<Self>) -> impl IntoElement {
-        const LABEL: &str = "Generate and analyze code with language models. You can dialog with the assistant in this panel or transform code inline.";
-
-        v_flex().gap_6().p_4().child(Label::new(LABEL)).child(
+        v_flex().gap_6().p_4().child(Label::new(t!("Generate and analyze code with language models. You can dialog with the assistant in this panel or transform code inline."))).child(
             v_flex()
                 .gap_2()
                 .child(
-                    Button::new("sign_in", "Sign in")
+                    Button::new("sign_in", t!("Sign in"))
                         .icon_color(Color::Muted)
                         .icon(IconName::Github)
                         .icon_position(IconPosition::Start)
@@ -198,7 +197,7 @@ impl Render for AuthenticationPrompt {
                 )
                 .child(
                     div().flex().w_full().items_center().child(
-                        Label::new("Sign in to enable collaboration.")
+                        Label::new(t!("Sign in to enable collaboration."))
                             .color(Color::Muted)
                             .size(LabelSize::Small),
                     ),

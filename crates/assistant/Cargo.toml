@@ -42,6 +42,7 @@ gpui.workspace = true
 heed.workspace = true
 html_to_markdown.workspace = true
 http.workspace = true
+i18n.workspace = true
 indexed_docs.workspace = true
 indoc.workspace = true
 language.workspace = true

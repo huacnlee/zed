@@ -2,12 +2,15 @@ About Zed…: 关于 Zed…
 Add Cursor Above: 在上方添加光标
 Add Cursor Below: 在下方添加光标
 Add Folder to Project…: 添加文件夹到项目…
+Open a new Project…: 打开新项目…
+Open Recent Projects…: 打开最近的项目…
 Back: 后退
 Check for Updates: 检查更新
 Close All Docks: 关闭所有面板
 Close Editor: 关闭编辑器
 Close Window: 关闭窗口
 Collab Panel: 协作面板
+Open Application Menu: 打开应用菜单
 Command Palette…: 命令面板…
 Copy: 复制
 Cut: 剪切
@@ -23,7 +26,7 @@ Find All References: 查找所有引用
 Find In Project: 在项目中查找
 Find: 查找
 Forward: 前进
-Give Feedback...: 提交反馈…
+Give Feedback…: 提交反馈…
 Go to Definition: 转到定义
 Go to File…: 转到文件…
 Go to Line/Column…: 转到行/列…
@@ -66,7 +69,6 @@ Settings: 设置
 Show All: 显示全部
 Show Welcome: 显示欢迎页
 Shrink Selection: 缩小选择
-Sign in to enable collaboration.: 登录以启用协作
 Sign in: 登录
 Sign Out: 登出
 Split Down: 向下拆分
@@ -88,3 +90,19 @@ Window: 窗口
 Zoom In: 放大
 Zoom Out: 缩小
 Zoom: 缩放
+Sign In: 登录
+Sign in to enable collaboration.: 登录以启用协作
+Generate and analyze code with language models. You can dialog with the assistant in this panel or transform code inline.: 使用语言模型生成和分析代码。您可以在此面板中与助手对话，或者在行内转换代码。
+Notifications: 通知
+"Work with your team in realtime with collaborative editing, voice, shared notes and more.": "通过协作编辑、语音、共享笔记等功能与团队实时合作。"
+You are not currently signed in to Zed. Currently the remote development featuers are only available to signed in users. Please sign in to continue.: 您当前未登录 Zed。目前远程开发功能仅对登录用户开放。请登录以继续。
+"No dev servers registered.": "未注册开发服务器。"
+"Dev Servers": "开发服务器"
+"New Server": 新增服务器
+"Register a new dev server": 注册新的开发服务器
+Key Bindings: 按键绑定
+Workspace: 工作区
+Open Command Palette: 打开命令面板
+Buffer Font Size: 编辑区字体尺寸
+UI Font Size: 界面字体尺寸
+Project: 项目

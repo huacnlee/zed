@@ -185,7 +185,7 @@ pub fn app_menus() -> Vec<Menu> {
                 MenuItem::action(t!("View Telemetry"), zed_actions::OpenTelemetryLog),
                 MenuItem::action(t!("View Dependency Licenses"), zed_actions::OpenLicenses),
                 MenuItem::action(t!("Show Welcome"), workspace::Welcome),
-                MenuItem::action(t!("Give Feedback..."), feedback::GiveFeedback),
+                MenuItem::action(t!("Give Feedback…"), feedback::GiveFeedback),
                 MenuItem::separator(),
                 MenuItem::action(
                     t!("Documentation"),

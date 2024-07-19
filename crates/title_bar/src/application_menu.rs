@@ -1,3 +1,4 @@
+use i18n::t;
 use ui::{prelude::*, ContextMenu, NumericStepper, PopoverMenu, Tooltip};
 
 #[derive(IntoElement)]
@@ -14,8 +15,11 @@ impl RenderOnce for ApplicationMenu {
         PopoverMenu::new("application-menu")
             .menu(move |cx| {
                 ContextMenu::build(cx, move |menu, cx| {
-                    menu.header("Workspace")
-                        .action("Open Command Palette", Box::new(command_palette::Toggle))
+                    menu.header(t!("Workspace"))
+                        .action(
+                            t!("Open Command Palette"),
+                            Box::new(command_palette::Toggle),
+                        )
                         .when_some(cx.focused(), |menu, focused| menu.context(focused))
                         .custom_row(move |cx| {
                             h_flex()
@@ -23,7 +27,7 @@ impl RenderOnce for ApplicationMenu {
                                 .w_full()
                                 .justify_between()
                                 .cursor(gpui::CursorStyle::Arrow)
-                                .child(Label::new("Buffer Font Size"))
+                                .child(Label::new(t!("Buffer Font Size")))
                                 .child(
                                     NumericStepper::new(
                                         theme::get_buffer_font_size(cx).to_string(),
@@ -57,7 +61,7 @@ impl RenderOnce for ApplicationMenu {
                                 .w_full()
                                 .justify_between()
                                 .cursor(gpui::CursorStyle::Arrow)
-                                .child(Label::new("UI Font Size"))
+                                .child(Label::new(t!("UI Font Size")))
                                 .child(
                                     NumericStepper::new(
                                         theme::get_ui_font_size(cx).to_string(),
@@ -85,43 +89,46 @@ impl RenderOnce for ApplicationMenu {
                                 )
                                 .into_any_element()
                         })
-                        .header("Project")
+                        .header(t!("Project"))
                         .action(
-                            "Add Folder to Project...",
+                            t!("Add Folder to Project…"),
                             Box::new(workspace::AddFolderToProject),
                         )
-                        .action("Open a new Project...", Box::new(workspace::Open))
+                        .action(t!("Open a new Project…"), Box::new(workspace::Open))
                         .action(
-                            "Open Recent Projects...",
+                            t!("Open Recent Projects…"),
                             Box::new(recent_projects::OpenRecent {
                                 create_new_window: false,
                             }),
                         )
-                        .header("Help")
-                        .action("About Zed", Box::new(zed_actions::About))
-                        .action("Welcome", Box::new(workspace::Welcome))
+                        .header(t!("Help"))
+                        .action(t!("About Zed…"), Box::new(zed_actions::About))
+                        .action(t!("Show Welcome"), Box::new(workspace::Welcome))
                         .link(
-                            "Documentation",
+                            t!("Documentation"),
                             Box::new(zed_actions::OpenBrowser {
                                 url: "https://zed.dev/docs".into(),
                             }),
                         )
-                        .action("Give Feedback", Box::new(feedback::GiveFeedback))
-                        .action("Check for Updates", Box::new(auto_update::Check))
-                        .action("View Telemetry", Box::new(zed_actions::OpenTelemetryLog))
+                        .action(t!("Give Feedback…"), Box::new(feedback::GiveFeedback))
+                        .action(t!("Check for Updates"), Box::new(auto_update::Check))
                         .action(
-                            "View Dependency Licenses",
+                            t!("View Telemetry"),
+                            Box::new(zed_actions::OpenTelemetryLog),
+                        )
+                        .action(
+                            t!("View Dependency Licenses"),
                             Box::new(zed_actions::OpenLicenses),
                         )
                         .separator()
-                        .action("Quit", Box::new(zed_actions::Quit))
+                        .action(t!("Quit"), Box::new(zed_actions::Quit))
                 })
                 .into()
             })
             .trigger(
                 IconButton::new("application-menu", ui::IconName::Menu)
                     .style(ButtonStyle::Subtle)
-                    .tooltip(|cx| Tooltip::text("Open Application Menu", cx))
+                    .tooltip(|cx| Tooltip::text(t!("Open Application Menu"), cx))
                     .icon_size(IconSize::Small),
             )
             .into_any_element()

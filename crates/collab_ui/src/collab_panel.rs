@@ -2048,7 +2048,7 @@ impl CollabPanel {
     }
 
     fn render_signed_out(&mut self, cx: &mut ViewContext<Self>) -> Div {
-        let collab_blurb = "Work with your team in realtime with collaborative editing, voice, shared notes and more.";
+        let collab_blurb = t!("Work with your team in realtime with collaborative editing, voice, shared notes and more.");
 
         v_flex()
             .gap_6()
@@ -2058,7 +2058,7 @@ impl CollabPanel {
                 v_flex()
                     .gap_2()
                     .child(
-                        Button::new("sign_in", t!("Sign in"))
+                        Button::new("sign_in", t!("Sign In"))
                             .icon_color(Color::Muted)
                             .icon(IconName::Github)
                             .icon_position(IconPosition::Start)
