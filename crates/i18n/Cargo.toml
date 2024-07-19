@@ -12,7 +12,6 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 assets.workspace = true
-rust-i18n.workspace = true
 gpui.workspace = true
 util.workspace = true
 settings.workspace = true
@@ -20,4 +19,5 @@ serde.workspace = true
 schemars.workspace = true
 once_cell.workspace = true
 
-serde_yaml = "0.9"
+rust-i18n = "3"
+serde_yml = "0.0.10"

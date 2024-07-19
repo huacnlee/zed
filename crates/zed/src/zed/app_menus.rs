@@ -21,7 +21,7 @@ pub fn app_menus() -> Vec<Menu> {
                         MenuItem::action(t!("Open Default Settings"), super::OpenDefaultSettings),
                         MenuItem::action(t!("Open Default Key Bindings"), super::OpenDefaultKeymap),
                         MenuItem::action(t!("Open Local Settings"), super::OpenLocalSettings),
-                        MenuItem::action(t!("Select Theme..."), theme_selector::Toggle::default()),
+                        MenuItem::action(t!("Select Theme…"), theme_selector::Toggle::default()),
                     ],
                 }),
                 MenuItem::action(t!("Extensions"), extensions_ui::Extensions),
@@ -41,7 +41,7 @@ pub fn app_menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action(t!("Open…"), workspace::Open),
                 MenuItem::action(
-                    t!("Open Recent..."),
+                    t!("Open Recent…"),
                     recent_projects::OpenRecent {
                         create_new_window: true,
                     },
@@ -147,15 +147,15 @@ pub fn app_menus() -> Vec<Menu> {
                 MenuItem::action(t!("Back"), workspace::GoBack),
                 MenuItem::action(t!("Forward"), workspace::GoForward),
                 MenuItem::separator(),
-                MenuItem::action(t!("Command Palette..."), command_palette::Toggle),
+                MenuItem::action(t!("Command Palette…"), command_palette::Toggle),
                 MenuItem::separator(),
-                MenuItem::action(t!("Go to File..."), workspace::ToggleFileFinder::default()),
+                MenuItem::action(t!("Go to File…"), workspace::ToggleFileFinder::default()),
                 // MenuItem::action("Go to Symbol in Project", project_symbols::Toggle),
                 MenuItem::action(
-                    t!("Go to Symbol in Editor..."),
+                    t!("Go to Symbol in Editor…"),
                     editor::actions::ToggleOutline,
                 ),
-                MenuItem::action(t!("Go to Line/Column..."), editor::actions::ToggleGoToLine),
+                MenuItem::action(t!("Go to Line/Column…"), editor::actions::ToggleGoToLine),
                 MenuItem::separator(),
                 MenuItem::action(t!("Go to Definition"), editor::actions::GoToDefinition),
                 MenuItem::action(

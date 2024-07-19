@@ -1050,7 +1050,7 @@ dependencies = [
  "aws-smithy-types",
  "aws-types",
  "bytes 1.5.0",
- "fastrand 2.0.0",
+ "fastrand 2.1.0",
  "hex",
  "http 0.2.9",
  "hyper",
@@ -1088,7 +1088,7 @@ dependencies = [
  "aws-smithy-types",
  "aws-types",
  "bytes 1.5.0",
- "fastrand 2.0.0",
+ "fastrand 2.1.0",
  "http 0.2.9",
  "http-body",
  "percent-encoding",
@@ -1316,7 +1316,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes 1.5.0",
- "fastrand 2.0.0",
+ "fastrand 2.1.0",
  "h2",
  "http 0.2.9",
  "http-body",
@@ -1747,7 +1747,7 @@ dependencies = [
  "async-channel 2.2.0",
  "async-lock 3.3.0",
  "async-task",
- "fastrand 2.0.0",
+ "fastrand 2.1.0",
  "futures-io",
  "futures-lite 2.2.0",
  "piper",
@@ -2593,7 +2593,6 @@ dependencies = [
  "release_channel",
  "rich_text",
  "rpc",
- "rust-i18n",
  "schemars",
  "serde",
  "serde_derive",
@@ -4056,9 +4055,9 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6999dc1837253364c2ebb0704ba97994bd874e8f195d665c50b7548f6ea92764"
+checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 
 [[package]]
 name = "fd-lock"
@@ -4564,7 +4563,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "445ba825b27408685aaecefd65178908c36c6e96aaf6d8599419d46e624192ba"
 dependencies = [
- "fastrand 2.0.0",
+ "fastrand 2.1.0",
  "futures-core",
  "futures-io",
  "parking",
@@ -5430,7 +5429,7 @@ dependencies = [
  "rust-i18n",
  "schemars",
  "serde",
- "serde_yaml 0.9.34+deprecated",
+ "serde_yml",
  "settings",
  "util",
 ]
@@ -6224,6 +6223,12 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
+
+[[package]]
+name = "libyml"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e281a65eeba3d4503a2839252f86374528f9ceafe6fed97c1d3b52e1fb625c1"
 
 [[package]]
 name = "libz-sys"
@@ -7806,7 +7811,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "668d31b1c4eba19242f2088b2bf3316b82ca31082a8335764db4e083db7485d4"
 dependencies = [
  "atomic-waker",
- "fastrand 2.0.0",
+ "fastrand 2.1.0",
  "futures-io",
 ]
 
@@ -8620,15 +8625,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redox_syscall"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4722d768eff46b75989dd134e5c353f0d6296e5aaa3132e776cbdb56be7731aa"
-dependencies = [
- "bitflags 1.3.2",
-]
-
-[[package]]
 name = "redox_users"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9113,7 +9109,7 @@ dependencies = [
  "rust-i18n-support",
  "serde",
  "serde_json",
- "serde_yaml 0.8.26",
+ "serde_yaml",
  "syn 2.0.59",
 ]
 
@@ -9132,7 +9128,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serde_yaml 0.8.26",
+ "serde_yaml",
  "toml 0.7.8",
  "triomphe",
 ]
@@ -9607,18 +9603,18 @@ checksum = "b0293b4b29daaf487284529cc2f5675b8e57c61f70167ba415a463651fd6a918"
 
 [[package]]
 name = "serde"
-version = "1.0.202"
+version = "1.0.204"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "226b61a0d411b2ba5ff6d7f73a476ac4f8bb900373459cd00fab8512828ba395"
+checksum = "bc76f558e0cbb2a839d37354c575f1dc3fdc6546b5be373ba43d95f231bf7c12"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.202"
+version = "1.0.204"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6048858004bcff69094cd972ed40a32500f153bd3be9f716b2eed2e8217c4838"
+checksum = "e0cd7e117be63d3c3678776753929474f3b04a43a080c744d6b0ae2a8c28e222"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9724,16 +9720,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
+name = "serde_yml"
+version = "0.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+checksum = "78ce6afeda22f0b55dde2c34897bce76a629587348480384231205c14b59a01f"
 dependencies = [
  "indexmap 2.2.6",
  "itoa",
+ "libyml",
+ "log",
+ "memchr",
  "ryu",
  "serde",
- "unsafe-libyaml",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -10864,13 +10864,12 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.9.0"
+version = "3.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01ce4141aa927a6d1bd34a041795abd0db1cccba5d5f24b009f694bdf3a1f3fa"
+checksum = "85b77fafb263dd9d05cbeac119526425676db3784113aa9295c88498cbf8bff1"
 dependencies = [
  "cfg-if",
- "fastrand 2.0.0",
- "redox_syscall 0.4.1",
+ "fastrand 2.1.0",
  "rustix 0.38.32",
  "windows-sys 0.52.0",
 ]
@@ -11039,6 +11038,7 @@ dependencies = [
  "fs",
  "fuzzy",
  "gpui",
+ "i18n",
  "log",
  "picker",
  "serde",
@@ -12000,12 +12000,6 @@ name = "unindent"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1766d682d402817b5ac4490b3c3002d91dfa0d22812f341609f97b08757359c"
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
@@ -13855,7 +13849,6 @@ dependencies = [
  "release_channel",
  "repl",
  "rope",
- "rust-i18n",
  "search",
  "serde",
  "serde_json",

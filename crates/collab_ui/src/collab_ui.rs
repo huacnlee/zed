@@ -5,8 +5,6 @@ pub mod notification_panel;
 pub mod notifications;
 mod panel_settings;
 
-i18n::init!();
-
 use std::{rc::Rc, sync::Arc};
 
 pub use collab_panel::CollabPanel;

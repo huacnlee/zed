@@ -55,8 +55,6 @@ use crate::zed::inline_completion_registry;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-i18n::init!();
-
 fn fail_to_launch(e: anyhow::Error) {
     eprintln!("Zed failed to launch: {e:?}");
     App::new().run(move |cx| {
@@ -194,7 +192,6 @@ fn init_ui(app_state: Arc<AppState>, cx: &mut AppContext) -> Result<()> {
         }
     };
 
-    i18n::set_locale("zh-CN");
     i18n::init(cx);
 
     load_embedded_fonts(cx);

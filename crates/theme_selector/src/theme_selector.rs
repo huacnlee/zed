@@ -6,6 +6,7 @@ use gpui::{
     actions, impl_actions, AppContext, DismissEvent, EventEmitter, FocusableView, Render,
     UpdateGlobal, View, ViewContext, VisualContext, WeakView,
 };
+use i18n::t;
 use picker::{Picker, PickerDelegate};
 use serde::Deserialize;
 use settings::{update_settings_file, SettingsStore};
@@ -179,7 +180,7 @@ impl PickerDelegate for ThemeSelectorDelegate {
     type ListItem = ui::ListItem;
 
     fn placeholder_text(&self, _cx: &mut WindowContext) -> Arc<str> {
-        "Select Theme...".into()
+        t!("Select Theme…").into()
     }
 
     fn match_count(&self) -> usize {
