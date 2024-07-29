@@ -4248,6 +4248,38 @@ impl<'a, V: 'static> ViewContext<'a, V> {
         subscription
     }
 
+    /// Register a listener to be called when the focus changes.
+    ///
+    /// The second argument is the focus handle that was focused before the change,
+    /// and the thrid argument is the focus handle that is focused after the change.
+    pub fn on_focus_changed(
+        &mut self,
+        mut listener: impl FnMut(&mut V, Option<FocusHandle>, Option<FocusHandle>, &mut ViewContext<V>)
+            + 'static,
+    ) -> Subscription {
+        let view = self.view.downgrade();
+        let handles = self.window.focus_handles.clone();
+
+        let (subscription, activate) =
+            self.window.new_focus_listener(Box::new(move |event, cx| {
+                let last_focus_handle = event
+                    .previous_focus_path
+                    .last()
+                    .and_then(|id| FocusHandle::for_id(*id, &handles));
+                let focus_handle = event
+                    .current_focus_path
+                    .last()
+                    .and_then(|id| FocusHandle::for_id(*id, &handles));
+
+                view.update(cx, |view, cx| {
+                    listener(view, last_focus_handle, focus_handle, cx);
+                })
+                .is_ok()
+            }));
+        self.app.defer(move |_| activate());
+        subscription
+    }
+
     /// Register a listener to be called when the given focus handle receives focus.
     /// Returns a subscription and persists until the subscription is dropped.
     pub fn on_focus(
