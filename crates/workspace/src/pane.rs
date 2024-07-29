@@ -506,23 +506,38 @@ impl Pane {
 
         if let Some(active_item) = self.active_item() {
             if self.focus_handle.is_focused(cx) {
+                let last_focus_handle = self
+                    .last_focus_handle_by_item
+                    .get(&active_item.item_id())
+                    .cloned();
+
+                if let Some(focused) = cx.last_focused() {
+                    if !self.context_menu_focused(cx) && focused != self.focus_handle {
+                        println!(
+                            "item: {:?}, last focus: {:?}",
+                            active_item.item_id(),
+                            focused
+                        );
+                        self.last_focus_handle_by_item
+                            .insert(active_item.item_id(), focused.downgrade());
+                    }
+                }
+
                 // Pane was focused directly. We need to either focus a view inside the active item,
                 // or focus the active item itself
-                if let Some(weak_last_focus_handle) =
-                    self.last_focus_handle_by_item.get(&active_item.item_id())
-                {
+                if let Some(weak_last_focus_handle) = last_focus_handle {
                     if let Some(focus_handle) = weak_last_focus_handle.upgrade() {
+                        println!(
+                            "item: {:?}, focusing it: {:?}",
+                            active_item.item_id(),
+                            focus_handle
+                        );
                         focus_handle.focus(cx);
                         return;
                     }
                 }
 
                 active_item.focus_handle(cx).focus(cx);
-            } else if let Some(focused) = cx.focused() {
-                if !self.context_menu_focused(cx) {
-                    self.last_focus_handle_by_item
-                        .insert(active_item.item_id(), focused.downgrade());
-                }
             }
         }
     }

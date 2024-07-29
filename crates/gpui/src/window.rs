@@ -549,6 +549,7 @@ pub struct Window {
     pub(crate) refreshing: bool,
     pub(crate) draw_phase: DrawPhase,
     activation_observers: SubscriberSet<(), AnyObserver>,
+    pub(crate) last_focus: Option<FocusId>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
     pending_input: Option<PendingInput>,
@@ -825,6 +826,7 @@ impl Window {
             refreshing: false,
             draw_phase: DrawPhase::None,
             activation_observers: SubscriberSet::new(),
+            last_focus: None,
             focus: None,
             focus_enabled: true,
             pending_input: None,
@@ -931,11 +933,23 @@ impl<'a> WindowContext<'a> {
         FocusHandle::new(&self.window.focus_handles)
     }
 
+    /// Obtain the last focused [`FocusHandle`]. If no elements have been focused, returns `None`.
+    pub fn last_focused(&self) -> Option<FocusHandle> {
+        self.window
+            .last_focus
+            .and_then(|id| FocusHandle::for_id(id, &self.window.focus_handles))
+    }
+
     /// Obtain the currently focused [`FocusHandle`]. If no elements are focused, returns `None`.
     pub fn focused(&self) -> Option<FocusHandle> {
         self.window
             .focus
             .and_then(|id| FocusHandle::for_id(id, &self.window.focus_handles))
+    }
+
+    fn set_focus(&mut self, focus_id: Option<FocusId>) {
+        self.window.last_focus = self.window.focus;
+        self.window.focus = focus_id;
     }
 
     /// Move focus to the element associated with the given [`FocusHandle`].
@@ -944,7 +958,7 @@ impl<'a> WindowContext<'a> {
             return;
         }
 
-        self.window.focus = Some(handle.id);
+        self.set_focus(Some(handle.id));
         self.clear_pending_keystrokes();
         self.refresh();
     }
@@ -955,7 +969,7 @@ impl<'a> WindowContext<'a> {
             return;
         }
 
-        self.window.focus = None;
+        self.set_focus(None);
         self.refresh();
     }
 
