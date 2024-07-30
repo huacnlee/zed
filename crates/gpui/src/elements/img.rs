@@ -4,6 +4,7 @@ use crate::{
     LayoutId, Length, Pixels, SharedString, SharedUri, Size, StyleRefinement, Styled, SvgSize,
     UriOrPath, WindowContext,
 };
+use bytemuck::ByteHash;
 use futures::{AsyncReadExt, Future};
 use http_client;
 use image::{
@@ -14,6 +15,7 @@ use media::core_video::CVImageBuffer;
 use smallvec::SmallVec;
 use std::{
     fs,
+    hash::Hash,
     io::Cursor,
     path::PathBuf,
     sync::Arc,
@@ -110,6 +112,7 @@ pub struct Img {
     source: ImageSource,
     grayscale: bool,
     object_fit: ObjectFit,
+    svg_size: Option<Size<Pixels>>,
 }
 
 /// Create a new image element.
@@ -117,6 +120,7 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
     Img {
         interactivity: Interactivity::default(),
         source: source.into(),
+        svg_size: None,
         grayscale: false,
         object_fit: ObjectFit::Contain,
     }
@@ -257,6 +261,14 @@ impl Img {
         self.object_fit = object_fit;
         self
     }
+
+    /// Set the SVG size for rendering.
+    ///
+    /// This method is used to rendering a SVG from a smaller source size to a larger target size.
+    pub fn svg_size(mut self, size: impl Into<Size<Pixels>>) -> Self {
+        self.svg_size = Some(size.into());
+        self
+    }
 }
 
 /// The image state between frames
@@ -287,11 +299,12 @@ impl Element for Img {
             });
 
             let frame_index = state.as_ref().map(|state| state.frame_index).unwrap_or(0);
+            let svg_size = self.svg_size.clone();
 
             let layout_id = self
                 .interactivity
                 .request_layout(global_id, cx, |mut style, cx| {
-                    if let Some(data) = self.source.data(cx) {
+                    if let Some(data) = self.source.data(svg_size, cx) {
                         if let Some(state) = &mut state {
                             let frame_count = data.frame_count();
                             if frame_count > 1 {
@@ -359,11 +372,12 @@ impl Element for Img {
         cx: &mut WindowContext,
     ) {
         let source = self.source.clone();
+        let svg_size = self.svg_size.clone();
         self.interactivity
             .paint(global_id, bounds, hitbox.as_ref(), cx, |style, cx| {
                 let corner_radii = style.corner_radii.to_pixels(bounds.size, cx.rem_size());
 
-                if let Some(data) = source.data(cx) {
+                if let Some(data) = source.data(svg_size, cx) {
                     let new_bounds = self.object_fit.get_bounds(bounds, data.size(*frame_index));
                     cx.paint_image(
                         new_bounds,
@@ -410,7 +424,11 @@ impl InteractiveElement for Img {
 }
 
 impl ImageSource {
-    fn data(&self, cx: &mut WindowContext) -> Option<Arc<ImageData>> {
+    fn data(
+        &self,
+        svg_size: Option<Size<Pixels>>,
+        cx: &mut WindowContext,
+    ) -> Option<Arc<ImageData>> {
         match self {
             ImageSource::Uri(_) | ImageSource::Asset(_) | ImageSource::File(_) => {
                 let uri_or_path: UriOrPath = match self {
@@ -420,7 +438,11 @@ impl ImageSource {
                     _ => unreachable!(),
                 };
 
-                cx.use_cached_asset::<Image>(&uri_or_path)?.log_err()
+                cx.use_cached_asset::<Image>(&Source {
+                    uri_or_path,
+                    svg_size,
+                })?
+                .log_err()
             }
 
             ImageSource::Data(data) => Some(data.to_owned()),
@@ -433,8 +455,14 @@ impl ImageSource {
 #[derive(Clone)]
 enum Image {}
 
+#[derive(Clone, Hash)]
+struct Source {
+    uri_or_path: UriOrPath,
+    svg_size: Option<Size<Pixels>>,
+}
+
 impl Asset for Image {
-    type Source = UriOrPath;
+    type Source = Source;
     type Output = Result<Arc<ImageData>, ImageCacheError>;
 
     fn load(
@@ -445,8 +473,11 @@ impl Asset for Image {
         let scale_factor = cx.scale_factor();
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
+        let uri_or_path = source.uri_or_path.clone();
+        let svg_size = source.svg_size;
+
         async move {
-            let bytes = match source.clone() {
+            let bytes = match uri_or_path.clone() {
                 UriOrPath::Path(uri) => fs::read(uri.as_ref())?,
                 UriOrPath::Uri(uri) => {
                     let mut response = client.get(uri.as_ref(), ().into(), true).await?;
@@ -505,8 +536,12 @@ impl Asset for Image {
 
                 ImageData::new(data)
             } else {
-                let pixmap =
-                    svg_renderer.render_pixmap(&bytes, SvgSize::ScaleFactor(scale_factor))?;
+                let svg_size = match svg_size {
+                    Some(size) => SvgSize::Size(size.map(|s| DevicePixels(s.0 as i32))),
+                    None => SvgSize::ScaleFactor(scale_factor),
+                };
+
+                let pixmap = svg_renderer.render_pixmap(&bytes, svg_size)?;
 
                 let mut buffer =
                     ImageBuffer::from_raw(pixmap.width(), pixmap.height(), pixmap.take()).unwrap();

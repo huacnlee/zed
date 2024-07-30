@@ -14,6 +14,7 @@ pub(crate) struct SvgRenderer {
     asset_source: Arc<dyn AssetSource>,
 }
 
+#[derive(Clone)]
 pub enum SvgSize {
     Size(Size<DevicePixels>),
     ScaleFactor(f32),
