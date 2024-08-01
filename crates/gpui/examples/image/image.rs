@@ -74,8 +74,8 @@ impl Render for ImageShowcase {
             .size_full()
             .justify_center()
             .items_center()
+            .bg(gpui::white())
             .gap_8()
-            .bg(rgb(0xFFFFFF))
             .child(ImageContainer::new(
                 "Image loaded from a local file",
                 self.local_resource.clone(),
@@ -88,6 +88,13 @@ impl Render for ImageShowcase {
                 "Image loaded from an asset",
                 self.asset_resource.clone(),
             ))
+            .child(
+                div().size_full().child(
+                    img("image/color.svg")
+                        .size_full()
+                        .svg_size(size(px(800.), px(800.))),
+                ),
+            )
     }
 }
 
@@ -131,7 +138,7 @@ fn main() {
                         PathBuf::from_str("crates/gpui/examples/image/app-icon.png").unwrap(),
                     ),
                     remote_resource: "https://picsum.photos/512/512".into(),
-                    asset_resource: "image/app-icon.png".into(),
+                    asset_resource: "image/color.svg".into(),
                 })
             })
             .unwrap();
