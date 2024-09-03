@@ -306,15 +306,15 @@ impl TextLayout {
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
                 let text = if let Some(truncate_width) = truncate_width {
-                    let new_text =
+                    let truncated_text =
                         line_wrapper.truncate_line(text.clone(), truncate_width, ellipsis);
 
                     // Update run.len after the text has been truncated.
                     for run in runs.iter_mut() {
-                        run.len = std::cmp::min(run.len, new_text.len());
+                        run.len = std::cmp::min(run.len, truncated_text.len());
                     }
 
-                    new_text
+                    truncated_text
                 } else {
                     text.clone()
                 };
