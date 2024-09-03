@@ -311,7 +311,7 @@ impl TextLayout {
 
                     // Update run.len after the text has been truncated.
                     for run in runs.iter_mut() {
-                        run.len = new_text.len();
+                        run.len = std::cmp::min(run.len, new_text.len());
                     }
 
                     new_text
