@@ -50,8 +50,8 @@ parking = "2.0.0"
 parking_lot.workspace = true
 postage.workspace = true
 profiling.workspace = true
-rand = { optional = true, workspace = true }
-raw-window-handle = "0.6"
+rand = { optional = true, workspace = true}
+raw-window-handle = { version = "0.6", features = ["std"] }
 refineable.workspace = true
 resvg = { version = "0.41.0", default-features = false }
 usvg = { version = "0.41.0", default-features = false }
@@ -80,6 +80,7 @@ rand.workspace = true
 util = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
 unicode-segmentation.workspace = true
+wry = "0.41.0"
 
 [build-dependencies]
 embed-resource = "2.4"
@@ -172,6 +173,10 @@ path = "examples/set_menus.rs"
 [[example]]
 name = "window_shadow"
 path = "examples/window_shadow.rs"
+
+[[example]]
+name = 'webview'
+path = "examples/webview.rs"
 
 [[example]]
 name = "input"
