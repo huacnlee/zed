@@ -1047,6 +1047,11 @@ impl Window {
         self.handle
     }
 
+    /// Obtain a raw handle to the platform_window that belongs to this context.
+    pub fn raw_window_handle(&self) -> &dyn PlatformWindow {
+        self.platform_window.as_ref()
+    }
+
     /// Mark the window as dirty, scheduling it to be redrawn on the next frame.
     pub fn refresh(&mut self) {
         if self.invalidator.not_painting() {
