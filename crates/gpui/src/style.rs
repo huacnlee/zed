@@ -227,6 +227,7 @@ pub struct Style {
     pub box_shadow: SmallVec<[BoxShadow; 2]>,
 
     /// The text style of this element
+    #[refinement]
     pub text: TextStyleRefinement,
 
     /// The mouse cursor style shown when the mouse pointer is over an element.

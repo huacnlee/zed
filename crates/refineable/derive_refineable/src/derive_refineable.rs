@@ -6,7 +6,7 @@ use syn::{
     Type, TypeParamBound, WhereClause, WherePredicate,
 };
 
-#[proc_macro_derive(Refineable, attributes(refineable))]
+#[proc_macro_derive(Refineable, attributes(refineable, refinement))]
 pub fn derive_refineable(input: TokenStream) -> TokenStream {
     let DeriveInput {
         ident,
@@ -91,7 +91,7 @@ pub fn derive_refineable(input: TokenStream) -> TokenStream {
         .iter()
         .map(|field| {
             let name = &field.ident;
-            let is_refineable = is_refineable_field(field);
+            let is_refineable = is_refineable_field(field) || is_refinement_field(field);
             let is_optional = is_optional_field(field);
 
             if is_refineable {
@@ -118,7 +118,7 @@ pub fn derive_refineable(input: TokenStream) -> TokenStream {
         .iter()
         .map(|field| {
             let name = &field.ident;
-            let is_refineable = is_refineable_field(field);
+            let is_refineable = is_refineable_field(field) || is_refinement_field(field);
             let is_optional = is_optional_field(field);
 
             if is_refineable {
@@ -145,7 +145,7 @@ pub fn derive_refineable(input: TokenStream) -> TokenStream {
         .iter()
         .map(|field| {
             let name = &field.ident;
-            let is_refineable = is_refineable_field(field);
+            let is_refineable = is_refineable_field(field) || is_refinement_field(field);
 
             if is_refineable {
                 quote! {
@@ -165,7 +165,7 @@ pub fn derive_refineable(input: TokenStream) -> TokenStream {
         .iter()
         .map(|field| {
             let name = &field.ident;
-            let is_refineable = is_refineable_field(field);
+            let is_refineable = is_refineable_field(field) || is_refinement_field(field);
 
             if is_refineable {
                 quote! {
@@ -185,7 +185,7 @@ pub fn derive_refineable(input: TokenStream) -> TokenStream {
         .iter()
         .map(|field| {
             let name = &field.ident;
-            let is_refineable = is_refineable_field(field);
+            let is_refineable = is_refineable_field(field) || is_refinement_field(field);
             let is_optional = is_optional_field(field);
 
             if is_refineable {
@@ -326,6 +326,10 @@ pub fn derive_refineable(input: TokenStream) -> TokenStream {
 
 fn is_refineable_field(f: &Field) -> bool {
     f.attrs.iter().any(|attr| attr.path.is_ident("refineable"))
+}
+
+fn is_refinement_field(f: &Field) -> bool {
+    f.attrs.iter().any(|attr| attr.path.is_ident("refinement"))
 }
 
 fn is_optional_field(f: &Field) -> bool {
