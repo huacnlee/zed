@@ -5344,6 +5344,7 @@ dependencies = [
  "foreign-types 0.5.0",
  "futures 0.3.30",
  "gpui_macros",
+ "gtk",
  "http_client",
  "image",
  "itertools 0.13.0",
