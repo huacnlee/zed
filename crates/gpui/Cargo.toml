@@ -119,6 +119,9 @@ http_client = { workspace = true, features = ["test-support"] }
 unicode-segmentation.workspace = true
 wry = "0.41.0"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gtk = "0.18.0"
+
 [build-dependencies]
 embed-resource = "2.4"
 
