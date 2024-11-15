@@ -12,54 +12,66 @@ struct PaintingViewer {
 impl PaintingViewer {
     fn new() -> Self {
         let mut lines = vec![];
-
-        // draw a line
-        let mut path = Path::new(point(px(50.), px(180.)));
-        path.line_to(point(px(100.), px(120.)));
-        // go back to close the path
-        path.line_to(point(px(100.), px(121.)));
-        path.line_to(point(px(50.), px(181.)));
+        let points = [
+            point(px(20.), px(110.)),
+            point(px(50.), px(20.)),
+            point(px(60.), px(50.)),
+            point(px(70.), px(30.)),
+            point(px(80.), px(88.)),
+            point(px(90.), px(40.)),
+            point(px(90.), px(40.)),
+            point(px(110.), px(34.)),
+            point(px(140.), px(90.)),
+            point(px(170.), px(50.)),
+            point(px(200.), px(100.)),
+            point(px(230.), px(150.)),
+            point(px(250.), px(70.)),
+            point(px(262.), px(25.)),
+            point(px(280.), px(22.)),
+            point(px(290.), px(25.)),
+            point(px(300.), px(50.)),
+        ];
+        let offset = point(px(30.), px(160.));
+        let mut path = Path::new(points[0] + offset);
+        for p in points.iter().skip(1) {
+            path.line_to(*p + offset);
+        }
+        path.stroke(px(1.));
         lines.push(path);
 
         // draw a lightening bolt ⚡
-        let mut path = Path::new(point(px(150.), px(200.)));
-        path.line_to(point(px(200.), px(125.)));
-        path.line_to(point(px(200.), px(175.)));
-        path.line_to(point(px(250.), px(100.)));
+        let points = [
+            point(px(150.), px(200.)),
+            point(px(200.), px(125.)),
+            point(px(200.), px(175.)),
+            point(px(250.), px(100.)),
+        ];
+        let offset = point(px(200.), px(80.));
+        let mut path = Path::new(points[0] + offset);
+        for p in points.iter().skip(1) {
+            path.line_to(*p + offset);
+        }
         lines.push(path);
 
         // draw a ⭐
-        let mut path = Path::new(point(px(350.), px(100.)));
-        path.line_to(point(px(370.), px(160.)));
-        path.line_to(point(px(430.), px(160.)));
-        path.line_to(point(px(380.), px(200.)));
-        path.line_to(point(px(400.), px(260.)));
-        path.line_to(point(px(350.), px(220.)));
-        path.line_to(point(px(300.), px(260.)));
-        path.line_to(point(px(320.), px(200.)));
-        path.line_to(point(px(270.), px(160.)));
-        path.line_to(point(px(330.), px(160.)));
-        path.line_to(point(px(350.), px(100.)));
-        lines.push(path);
-
-        let square_bounds = Bounds {
-            origin: point(px(450.), px(100.)),
-            size: size(px(200.), px(80.)),
-        };
-        let height = square_bounds.size.height;
-        let horizontal_offset = height;
-        let vertical_offset = px(30.);
-        let mut path = Path::new(square_bounds.lower_left());
-        path.curve_to(
-            square_bounds.origin + point(horizontal_offset, vertical_offset),
-            square_bounds.origin + point(px(0.0), vertical_offset),
-        );
-        path.line_to(square_bounds.upper_right() + point(-horizontal_offset, vertical_offset));
-        path.curve_to(
-            square_bounds.lower_right(),
-            square_bounds.upper_right() + point(px(0.0), vertical_offset),
-        );
-        path.line_to(square_bounds.lower_left());
+        let points = [
+            point(px(350.), px(100.)),
+            point(px(370.), px(160.)),
+            point(px(430.), px(160.)),
+            point(px(380.), px(200.)),
+            point(px(400.), px(260.)),
+            point(px(350.), px(220.)),
+            point(px(300.), px(260.)),
+            point(px(320.), px(200.)),
+            point(px(270.), px(160.)),
+            point(px(330.), px(160.)),
+            point(px(350.), px(100.)),
+        ];
+        let offset = point(px(200.), px(80.));
+        let mut path = Path::new(points[0] + offset);
+        for p in points.iter().skip(1) {
+            path.line_to(*p + offset);
+        }
         lines.push(path);
 
         Self {
@@ -115,25 +127,16 @@ impl Render for PaintingViewer {
                         canvas(
                             move |_, _| {},
                             move |_, _, cx| {
-                                const STROKE_WIDTH: Pixels = px(2.0);
                                 for path in default_lines {
                                     cx.paint_path(path, gpui::black());
                                 }
+
                                 for points in lines {
                                     let mut path = Path::new(points[0]);
                                     for p in points.iter().skip(1) {
                                         path.line_to(*p);
                                     }
-
-                                    let mut last = points.last().unwrap();
-                                    for p in points.iter().rev() {
-                                        let mut offset_x = px(0.);
-                                        if last.x == p.x {
-                                            offset_x = STROKE_WIDTH;
-                                        }
-                                        path.line_to(point(p.x + offset_x, p.y  + STROKE_WIDTH));
-                                        last = p;
-                                    }
+                                    path.stroke(px(1.));
 
                                     cx.paint_path(path, gpui::black());
                                 }

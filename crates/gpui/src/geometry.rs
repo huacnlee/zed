@@ -58,7 +58,21 @@ pub trait Along {
 /// let point = Point { x: 10, y: 20 };
 /// println!("{:?}", point); // Outputs: Point { x: 10, y: 20 }
 /// ```
-#[derive(Refineable, Default, Add, AddAssign, Sub, SubAssign, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    Refineable,
+    Default,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Deserialize,
+    Serialize,
+)]
 #[refineable(Debug)]
 #[repr(C)]
 pub struct Point<T: Default + Clone + Debug> {

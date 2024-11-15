@@ -730,6 +730,7 @@ pub(crate) struct PathId(pub(crate) usize);
 pub struct Path<P: Clone + Default + Debug> {
     pub(crate) id: PathId,
     order: DrawOrder,
+
     pub(crate) bounds: Bounds<P>,
     pub(crate) content_mask: ContentMask<P>,
     pub(crate) vertices: Vec<PathVertex<P>>,
@@ -737,6 +738,7 @@ pub struct Path<P: Clone + Default + Debug> {
     start: Point<P>,
     current: Point<P>,
     contour_count: usize,
+    contours: Vec<(Point<P>, Option<Point<P>>)>,
 }
 
 impl Path<Pixels> {
@@ -745,6 +747,7 @@ impl Path<Pixels> {
         Self {
             id: PathId(0),
             order: DrawOrder::default(),
+            contours: Vec::new(),
             vertices: Vec::new(),
             start,
             current: start,
@@ -763,6 +766,16 @@ impl Path<Pixels> {
         Path {
             id: self.id,
             order: self.order,
+            contours: self
+                .contours
+                .iter()
+                .map(|point| {
+                    (
+                        point.0.scale(factor),
+                        point.1.map(|point| point.scale(factor)),
+                    )
+                })
+                .collect(),
             bounds: self.bounds.scale(factor),
             content_mask: self.content_mask.scale(factor),
             vertices: self
@@ -779,6 +792,7 @@ impl Path<Pixels> {
 
     /// Draw a straight line from the current point to the given point.
     pub fn line_to(&mut self, to: Point<Pixels>) {
+        self.contours.push((to, None));
         self.contour_count += 1;
         if self.contour_count > 1 {
             self.push_triangle(
@@ -786,11 +800,13 @@ impl Path<Pixels> {
                 (point(0., 1.), point(0., 1.), point(0., 1.)),
             );
         }
+
         self.current = to;
     }
 
     /// Draw a curve from the current point to the given point, using the given control point.
     pub fn curve_to(&mut self, to: Point<Pixels>, ctrl: Point<Pixels>) {
+        self.contours.push((to, Some(ctrl)));
         self.contour_count += 1;
         if self.contour_count > 1 {
             self.push_triangle(
@@ -804,6 +820,59 @@ impl Path<Pixels> {
             (point(0., 0.), point(0.5, 0.), point(1., 1.)),
         );
         self.current = to;
+    }
+
+    /// Draw current path
+    pub fn stroke(&mut self, width: Pixels) {
+        if self.contours.is_empty() {
+            return;
+        }
+
+        // Iterate over all contours and draw the stroke
+        for i in (0..self.contours.len()).rev() {
+            let (end, ctrl) = self.contours[i];
+            if let Some(ctrl) = ctrl {
+                self.push_stroke(self.current, ctrl, width);
+                self.push_stroke(ctrl, end, width);
+            } else {
+                self.push_stroke(self.current, end, width);
+            }
+            self.current = end;
+        }
+    }
+
+    fn push_stroke(&mut self, start: Point<Pixels>, end: Point<Pixels>, width: Pixels) {
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let len = (dx * dx + dy * dy).0.sqrt();
+        let ux = dx / len * width / 2.0;
+        let uy = dy / len * width / 2.0;
+
+        let p1 = Point {
+            x: start.x - uy,
+            y: start.y + ux,
+        };
+        let p2 = Point {
+            x: start.x + uy,
+            y: start.y - ux,
+        };
+        let p3 = Point {
+            x: end.x - uy,
+            y: end.y + ux,
+        };
+        let p4 = Point {
+            x: end.x + uy,
+            y: end.y - ux,
+        };
+
+        self.push_triangle(
+            (p1, p2, p3),
+            (point(0.0, 0.0), point(1.0, 0.0), point(0.0, 1.0)),
+        );
+        self.push_triangle(
+            (p2, p3, p4),
+            (point(1.0, 0.0), point(0.0, 1.0), point(1.0, 1.0)),
+        );
     }
 
     fn push_triangle(
