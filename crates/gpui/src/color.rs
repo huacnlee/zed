@@ -376,7 +376,7 @@ pub fn red() -> Hsla {
 /// The color blue in [`Hsla`]
 pub fn blue() -> Hsla {
     Hsla {
-        h: 0.6666666666,
+        h: 0.6,
         s: 1.,
         l: 0.5,
         a: 1.,
