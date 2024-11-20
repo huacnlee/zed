@@ -857,6 +857,12 @@ impl Path<Pixels> {
             content_mask: Default::default(),
         });
     }
+
+    /// Force to set the vertices and bounds of the path.
+    pub fn set_vertices(&mut self, vertices: Vec<PathVertex<Pixels>>, bounds: Bounds<Pixels>) {
+        self.bounds = bounds;
+        self.vertices = vertices;
+    }
 }
 
 impl Eq for Path<ScaledPixels> {}
@@ -885,15 +891,26 @@ impl From<Path<ScaledPixels>> for Primitive {
     }
 }
 
+/// A vertex in a path.
 #[derive(Clone, Debug)]
 #[repr(C)]
-pub(crate) struct PathVertex<P: Clone + Default + Debug> {
+pub struct PathVertex<P: Clone + Default + Debug> {
     pub(crate) xy_position: Point<P>,
     pub(crate) st_position: Point<f32>,
     pub(crate) content_mask: ContentMask<P>,
 }
 
 impl PathVertex<Pixels> {
+    /// Create a new vertex with the given position.
+    pub fn new(xy_position: Point<Pixels>, st_position: Point<f32>) -> Self {
+        Self {
+            xy_position,
+            st_position,
+            content_mask: Default::default(),
+        }
+    }
+
+    /// Scale this vertex by the given factor.
     pub fn scale(&self, factor: f32) -> PathVertex<ScaledPixels> {
         PathVertex {
             xy_position: self.xy_position.scale(factor),

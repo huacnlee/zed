@@ -1,69 +1,85 @@
+use epaint::{pos2, Shape};
 use gpui::{
     canvas, div, point, prelude::*, px, size, App, AppContext, Bounds, MouseDownEvent, Path,
-    Pixels, Point, Render, ViewContext, WindowOptions,
+    PathVertex, Pixels, Point, Render, ViewContext, WindowOptions,
 };
 struct PaintingViewer {
-    default_lines: Vec<Path<Pixels>>,
+    default_shapes: Vec<Shape>,
     lines: Vec<Vec<Point<Pixels>>>,
     start: Point<Pixels>,
     _painting: bool,
 }
 
+fn tessellate(shape: epaint::Shape) -> (Vec<PathVertex<Pixels>>, Bounds<Pixels>) {
+    let options = epaint::TessellationOptions::default();
+    let mut mesh = epaint::Mesh::default();
+    let rect = shape.visual_bounding_rect();
+
+    epaint::tessellator::Tessellator::new(1., options, [12, 12], vec![])
+        .tessellate_shape(shape, &mut mesh);
+
+    let bounds = Bounds {
+        origin: point(px(rect.min.x), px(rect.min.y)),
+        size: size(px(rect.width()), px(rect.height())),
+    };
+
+    let mut vertices = vec![];
+    for vertex in mesh.vertices {
+        dbg!(vertex);
+        vertices.push(PathVertex::new(
+            point(px(vertex.pos.x), px(vertex.pos.y)),
+            point(vertex.uv.x, vertex.uv.y),
+        ));
+    }
+
+    (vertices, bounds)
+}
+
 impl PaintingViewer {
     fn new() -> Self {
-        let mut lines = vec![];
+        let mut shapes = vec![];
+        let stroke = epaint::Stroke::new(1., epaint::Color32::BLACK);
 
         // draw a line
-        let mut path = Path::new(point(px(50.), px(180.)));
-        path.line_to(point(px(100.), px(120.)));
-        // go back to close the path
-        path.line_to(point(px(100.), px(121.)));
-        path.line_to(point(px(50.), px(181.)));
-        lines.push(path);
-
-        // draw a lightening bolt ⚡
-        let mut path = Path::new(point(px(150.), px(200.)));
-        path.line_to(point(px(200.), px(125.)));
-        path.line_to(point(px(200.), px(175.)));
-        path.line_to(point(px(250.), px(100.)));
-        lines.push(path);
-
-        // draw a ⭐
-        let mut path = Path::new(point(px(350.), px(100.)));
-        path.line_to(point(px(370.), px(160.)));
-        path.line_to(point(px(430.), px(160.)));
-        path.line_to(point(px(380.), px(200.)));
-        path.line_to(point(px(400.), px(260.)));
-        path.line_to(point(px(350.), px(220.)));
-        path.line_to(point(px(300.), px(260.)));
-        path.line_to(point(px(320.), px(200.)));
-        path.line_to(point(px(270.), px(160.)));
-        path.line_to(point(px(330.), px(160.)));
-        path.line_to(point(px(350.), px(100.)));
-        lines.push(path);
-
-        let square_bounds = Bounds {
-            origin: point(px(450.), px(100.)),
-            size: size(px(200.), px(80.)),
-        };
-        let height = square_bounds.size.height;
-        let horizontal_offset = height;
-        let vertical_offset = px(30.);
-        let mut path = Path::new(square_bounds.lower_left());
-        path.curve_to(
-            square_bounds.origin + point(horizontal_offset, vertical_offset),
-            square_bounds.origin + point(px(0.0), vertical_offset),
+        let shape = Shape::line(
+            vec![pos2(50., 180.), pos2(100., 100.), pos2(150., 50.)],
+            stroke,
         );
-        path.line_to(square_bounds.upper_right() + point(-horizontal_offset, vertical_offset));
-        path.curve_to(
-            square_bounds.lower_right(),
-            square_bounds.upper_right() + point(px(0.0), vertical_offset),
-        );
-        path.line_to(square_bounds.lower_left());
-        lines.push(path);
+        shapes.push(shape);
+
+        // // draw a lightening bolt ⚡
+        // let shape = Shape::line(
+        //     vec![
+        //         pos2(150., 200.),
+        //         pos2(200., 125.),
+        //         pos2(200., 175.),
+        //         pos2(250., 100.),
+        //     ],
+        //     stroke,
+        // );
+        // shapes.push(shape);
+
+        // // draw a ⭐
+        // let shape = Shape::closed_line(
+        //     vec![
+        //         pos2(350., 100.),
+        //         pos2(370., 160.),
+        //         pos2(430., 160.),
+        //         pos2(380., 200.),
+        //         pos2(400., 260.),
+        //         pos2(350., 220.),
+        //         pos2(300., 260.),
+        //         pos2(320., 200.),
+        //         pos2(270., 160.),
+        //         pos2(330., 160.),
+        //         pos2(350., 100.),
+        //     ],
+        //     stroke,
+        // );
+        // shapes.push(shape);
 
         Self {
-            default_lines: lines.clone(),
+            default_shapes: shapes,
             lines: vec![],
             start: point(px(0.), px(0.)),
             _painting: false,
@@ -77,7 +93,7 @@ impl PaintingViewer {
 }
 impl Render for PaintingViewer {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
-        let default_lines = self.default_lines.clone();
+        let shapes = self.default_shapes.clone();
         let lines = self.lines.clone();
         div()
             .font_family(".SystemUIFont")
@@ -116,7 +132,11 @@ impl Render for PaintingViewer {
                             move |_, _| {},
                             move |_, _, cx| {
                                 const STROKE_WIDTH: Pixels = px(2.0);
-                                for path in default_lines {
+                                for shape in shapes {
+                                    let mut path = Path::new(point(px(0.), px(0.)));
+                                    let (vertices, bounds) = tessellate(shape);
+                                    path.set_vertices(vertices, bounds);
+
                                     cx.paint_path(path, gpui::black());
                                 }
                                 for points in lines {
