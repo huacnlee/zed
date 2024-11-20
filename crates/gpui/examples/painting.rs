@@ -1,7 +1,7 @@
 use epaint::{pos2, Shape};
 use gpui::{
     canvas, div, point, prelude::*, px, size, App, AppContext, Bounds, MouseDownEvent, Path,
-    PathVertex, Pixels, Point, Render, ViewContext, WindowOptions,
+    PathVertex, Pixels, Point, Render, ViewContext, WindowContext, WindowOptions,
 };
 struct PaintingViewer {
     default_shapes: Vec<Shape>,
@@ -10,12 +10,15 @@ struct PaintingViewer {
     _painting: bool,
 }
 
-fn tessellate(shape: epaint::Shape) -> (Vec<PathVertex<Pixels>>, Bounds<Pixels>) {
+fn tessellate(
+    shape: epaint::Shape,
+    cx: &WindowContext,
+) -> (Vec<PathVertex<Pixels>>, Bounds<Pixels>) {
     let options = epaint::TessellationOptions::default();
     let mut mesh = epaint::Mesh::default();
     let rect = shape.visual_bounding_rect();
 
-    epaint::tessellator::Tessellator::new(1., options, [12, 12], vec![])
+    epaint::tessellator::Tessellator::new(cx.scale_factor(), options, [0, 0], vec![])
         .tessellate_shape(shape, &mut mesh);
 
     let bounds = Bounds {
@@ -25,10 +28,10 @@ fn tessellate(shape: epaint::Shape) -> (Vec<PathVertex<Pixels>>, Bounds<Pixels>)
 
     let mut vertices = vec![];
     for vertex in mesh.vertices {
-        dbg!(vertex);
+        dbg!(&vertex);
         vertices.push(PathVertex::new(
             point(px(vertex.pos.x), px(vertex.pos.y)),
-            point(vertex.uv.x, vertex.uv.y),
+            point(vertex.uv.x, 1.0 - vertex.uv.y),
         ));
     }
 
@@ -36,28 +39,27 @@ fn tessellate(shape: epaint::Shape) -> (Vec<PathVertex<Pixels>>, Bounds<Pixels>)
 }
 
 impl PaintingViewer {
-    fn new() -> Self {
+    fn new(_cx: &mut ViewContext<Self>) -> Self {
         let mut shapes = vec![];
         let stroke = epaint::Stroke::new(1., epaint::Color32::BLACK);
 
         // draw a line
         let shape = Shape::line(
-            vec![pos2(50., 180.), pos2(100., 100.), pos2(150., 50.)],
+            vec![pos2(50., 140.), pos2(100., 220.), pos2(150., 160.)],
             stroke,
         );
         shapes.push(shape);
 
+        // draw a circle
+        let shape = Shape::circle_filled(pos2(300., 200.), 100., epaint::Color32::BLACK);
+        shapes.push(shape);
+
         // // draw a lightening bolt ⚡
-        // let shape = Shape::line(
-        //     vec![
-        //         pos2(150., 200.),
-        //         pos2(200., 125.),
-        //         pos2(200., 175.),
-        //         pos2(250., 100.),
-        //     ],
-        //     stroke,
-        // );
-        // shapes.push(shape);
+        let shape = Shape::closed_line(
+            vec![pos2(520., 230.), pos2(620., 100.), pos2(700., 230.)],
+            stroke,
+        );
+        shapes.push(shape);
 
         // // draw a ⭐
         // let shape = Shape::closed_line(
@@ -131,31 +133,25 @@ impl Render for PaintingViewer {
                         canvas(
                             move |_, _| {},
                             move |_, _, cx| {
-                                const STROKE_WIDTH: Pixels = px(2.0);
+                                let stroke = epaint::Stroke::new(1., epaint::Color32::BLACK);
                                 for shape in shapes {
                                     let mut path = Path::new(point(px(0.), px(0.)));
-                                    let (vertices, bounds) = tessellate(shape);
+                                    let (vertices, bounds) = tessellate(shape, cx);
                                     path.set_vertices(vertices, bounds);
-
                                     cx.paint_path(path, gpui::black());
                                 }
+
                                 for points in lines {
-                                    let mut path = Path::new(points[0]);
-                                    for p in points.iter().skip(1) {
-                                        path.line_to(*p);
+                                    let mut path = Path::new(point(px(0.), px(0.)));
+                                    let shape = epaint::Shape::line(
+                                        points.iter().map(|p| pos2(p.x.0, p.y.0)).collect(),
+                                        stroke,
+                                    );
+                                    let (vertices, bounds) = tessellate(shape, cx);
+                                    if vertices.len() > 0 {
+                                        path.set_vertices(vertices, bounds);
+                                        cx.paint_path(path, gpui::black());
                                     }
-
-                                    let mut last = points.last().unwrap();
-                                    for p in points.iter().rev() {
-                                        let mut offset_x = px(0.);
-                                        if last.x == p.x {
-                                            offset_x = STROKE_WIDTH;
-                                        }
-                                        path.line_to(point(p.x + offset_x, p.y  + STROKE_WIDTH));
-                                        last = p;
-                                    }
-
-                                    cx.paint_path(path, gpui::black());
                                 }
                             },
                         )
@@ -189,7 +185,11 @@ impl Render for PaintingViewer {
                         }
 
                         if let Some(path) = this.lines.last_mut() {
-                            path.push(pos);
+                            if let Some(last_pos) = path.last() {
+                                if pos != *last_pos {
+                                    path.push(pos);
+                                }
+                            }
                         }
 
                         cx.notify();
@@ -211,7 +211,7 @@ fn main() {
                 focus: true,
                 ..Default::default()
             },
-            |cx| cx.new_view(|_| PaintingViewer::new()),
+            |cx| cx.new_view(PaintingViewer::new),
         )
         .unwrap();
         cx.activate(true);
