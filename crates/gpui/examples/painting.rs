@@ -28,7 +28,6 @@ fn tessellate(
 
     let mut vertices = vec![];
     for vertex in mesh.vertices {
-        dbg!(&vertex);
         vertices.push(PathVertex::new(
             point(px(vertex.pos.x), px(vertex.pos.y)),
             point(vertex.uv.x, 1.0 - vertex.uv.y),
@@ -44,10 +43,7 @@ impl PaintingViewer {
         let stroke = epaint::Stroke::new(1., epaint::Color32::BLACK);
 
         // draw a line
-        let shape = Shape::line(
-            vec![pos2(50., 140.), pos2(100., 220.), pos2(150., 160.)],
-            stroke,
-        );
+        let shape = Shape::line(vec![pos2(50., 140.), pos2(100., 220.)], stroke);
         shapes.push(shape);
 
         // draw a circle
@@ -55,11 +51,11 @@ impl PaintingViewer {
         shapes.push(shape);
 
         // // draw a lightening bolt ⚡
-        let shape = Shape::closed_line(
-            vec![pos2(520., 230.), pos2(620., 100.), pos2(700., 230.)],
-            stroke,
-        );
-        shapes.push(shape);
+        // let shape = Shape::closed_line(
+        //     vec![pos2(520., 230.), pos2(620., 100.), pos2(700., 230.)],
+        //     stroke,
+        // );
+        // shapes.push(shape);
 
         // // draw a ⭐
         // let shape = Shape::closed_line(
@@ -160,10 +156,10 @@ impl Render for PaintingViewer {
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener(|this, ev: &MouseDownEvent, _| {
-                            this._painting = true;
                             this.start = ev.position;
-                            let path = vec![ev.position];
+                            let path = vec![];
                             this.lines.push(path);
+                            this._painting = true;
                         }),
                     )
                     .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, cx| {
@@ -186,10 +182,12 @@ impl Render for PaintingViewer {
 
                         if let Some(path) = this.lines.last_mut() {
                             if let Some(last_pos) = path.last() {
-                                if pos != *last_pos {
-                                    path.push(pos);
+                                if pos == *last_pos {
+                                    return
                                 }
                             }
+
+                            path.push(pos);
                         }
 
                         cx.notify();
