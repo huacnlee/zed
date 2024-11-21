@@ -21,20 +21,27 @@ float2 erf(float2 x);
 float blur_along_x(float x, float y, float sigma, float corner,
                    float2 half_size);
 float4 over(float4 below, float4 above);
+float radians(float degrees);
+float4 gradient_color(Background background, float2 position, Bounds_ScaledPixels bounds,
+  float4 solid_color, float4 color0, float4 color1);
 
 struct QuadVertexOutput {
-  float4 position [[position]];
-  float4 background_color [[flat]];
-  float4 border_color [[flat]];
   uint quad_id [[flat]];
+  float4 position [[position]];
+  float4 border_color [[flat]];
+  float4 background_solid [[flat]];
+  float4 background_color0 [[flat]];
+  float4 background_color1 [[flat]];
   float clip_distance [[clip_distance]][4];
 };
 
 struct QuadFragmentInput {
-  float4 position [[position]];
-  float4 background_color [[flat]];
-  float4 border_color [[flat]];
   uint quad_id [[flat]];
+  float4 position [[position]];
+  float4 border_color [[flat]];
+  float4 background_solid [[flat]];
+  float4 background_color0 [[flat]];
+  float4 background_color1 [[flat]];
 };
 
 vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
@@ -51,13 +58,25 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
       to_device_position(unit_vertex, quad.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, quad.bounds,
                                                  quad.content_mask.bounds);
-  float4 background_color = hsla_to_rgba(quad.background);
   float4 border_color = hsla_to_rgba(quad.border_color);
+
+  float4 background_solid = float4(0., 0., 0., 0.);
+  float4 background_color0 = float4(0., 0., 0., 0.);
+  float4 background_color1 = float4(0., 0., 0., 0.);
+  if (quad.background.tag == 0) {
+    background_solid = hsla_to_rgba(quad.background.solid);
+  } else if (quad.background.tag == 1) {
+    background_color0 = hsla_to_rgba(quad.background.colors[0].color);
+    background_color1 = hsla_to_rgba(quad.background.colors[1].color);
+  }
+
   return QuadVertexOutput{
-      device_position,
-      background_color,
-      border_color,
       quad_id,
+      device_position,
+      border_color,
+      background_solid,
+      background_color0,
+      background_color1,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
@@ -65,6 +84,11 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
                               [[buffer(QuadInputIndex_Quads)]]) {
   Quad quad = quads[input.quad_id];
+  float2 half_size = float2(quad.bounds.size.width, quad.bounds.size.height) / 2.;
+  float2 center = float2(quad.bounds.origin.x, quad.bounds.origin.y) + half_size;
+  float2 center_to_point = input.position.xy - center;
+  float4 color = gradient_color(quad.background, input.position.xy, quad.bounds,
+    input.background_solid, input.background_color0, input.background_color1);
 
   // Fast path when the quad is not rounded and doesn't have any border.
   if (quad.corner_radii.top_left == 0. && quad.corner_radii.bottom_left == 0. &&
@@ -72,14 +96,9 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
       quad.corner_radii.bottom_right == 0. && quad.border_widths.top == 0. &&
       quad.border_widths.left == 0. && quad.border_widths.right == 0. &&
       quad.border_widths.bottom == 0.) {
-    return input.background_color;
+    return color;
   }
 
-  float2 half_size =
-      float2(quad.bounds.size.width, quad.bounds.size.height) / 2.;
-  float2 center =
-      float2(quad.bounds.origin.x, quad.bounds.origin.y) + half_size;
-  float2 center_to_point = input.position.xy - center;
   float corner_radius;
   if (center_to_point.x < 0.) {
     if (center_to_point.y < 0.) {
@@ -118,15 +137,12 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
     border_width = vertical_border;
   }
 
-  float4 color;
-  if (border_width == 0.) {
-    color = input.background_color;
-  } else {
+  if (border_width != 0.) {
     float inset_distance = distance + border_width;
     // Blend the border on top of the background and then linearly interpolate
     // between the two as we slide inside the background.
-    float4 blended_border = over(input.background_color, input.border_color);
-    color = mix(blended_border, input.background_color,
+    float4 blended_border = over(color, input.border_color);
+    color = mix(blended_border, color,
                 saturate(0.5 - inset_distance));
   }
 
@@ -437,7 +453,10 @@ fragment float4 path_rasterization_fragment(PathRasterizationFragmentInput input
 struct PathSpriteVertexOutput {
   float4 position [[position]];
   float2 tile_position;
-  float4 color [[flat]];
+  uint sprite_id [[flat]];
+  float4 solid_color [[flat]];
+  float4 color0 [[flat]];
+  float4 color1 [[flat]];
 };
 
 vertex PathSpriteVertexOutput path_sprite_vertex(
@@ -456,8 +475,25 @@ vertex PathSpriteVertexOutput path_sprite_vertex(
   float4 device_position =
       to_device_position(unit_vertex, sprite.bounds, viewport_size);
   float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
-  float4 color = hsla_to_rgba(sprite.color);
-  return PathSpriteVertexOutput{device_position, tile_position, color};
+
+  float4 solid_color = float4(0., 0., 0., 0.);
+  float4 color0 = float4(0., 0., 0., 0.);
+  float4 color1 = float4(0., 0., 0., 0.);
+  if (sprite.color.tag == 0) {
+    solid_color = hsla_to_rgba(sprite.color.solid);
+  } else if (sprite.color.tag == 1) {
+    color0 = hsla_to_rgba(sprite.color.colors[0].color);
+    color1 = hsla_to_rgba(sprite.color.colors[1].color);
+  }
+
+  return PathSpriteVertexOutput{
+    device_position,
+    tile_position,
+    sprite_id,
+    solid_color,
+    color0,
+    color1
+  };
 }
 
 fragment float4 path_sprite_fragment(
@@ -469,7 +505,10 @@ fragment float4 path_sprite_fragment(
   float4 sample =
       atlas_texture.sample(atlas_texture_sampler, input.tile_position);
   float mask = 1. - abs(1. - fmod(sample.r, 2.));
-  float4 color = input.color;
+  PathSprite sprite = sprites[input.sprite_id];
+  Background background = sprite.color;
+  float4 color = gradient_color(background, input.position.xy, sprite.bounds,
+    input.solid_color, input.color0, input.color1);
   color.a *= mask;
   return color;
 }
@@ -690,4 +729,50 @@ float4 over(float4 below, float4 above) {
       (above.rgb * above.a + below.rgb * below.a * (1.0 - above.a)) / alpha;
   result.a = alpha;
   return result;
+}
+
+float4 gradient_color(Background background,
+                      float2 position,
+                      Bounds_ScaledPixels bounds,
+                      float4 solid_color, float4 color0, float4 color1) {
+  float4 color;
+
+  switch (background.tag) {
+      case 0:
+        color = solid_color;
+        break;
+      case 1: {
+        // -90 degrees to match the CSS gradient angle.
+        float radians = (fmod(background.angle, 360.0) - 90.0) * (M_PI_F / 180.0);
+        float2 direction = float2(cos(radians), sin(radians));
+
+        // Expand the short side to be the same as the long side
+        if (bounds.size.width > bounds.size.height) {
+          direction.y *= bounds.size.height / bounds.size.width;
+        } else {
+          direction.x *=  bounds.size.width / bounds.size.height;
+        }
+
+        // Get the t value for the linear gradient with the color stop percentages.
+        float2 half_size = float2(bounds.size.width, bounds.size.height) / 2.;
+        float2 center = float2(bounds.origin.x, bounds.origin.y) + half_size;
+        float2 center_to_point = position - center;
+        float t = dot(center_to_point, direction) / length(direction);
+        // Check the direct to determine the use x or y
+        if (abs(direction.x) > abs(direction.y)) {
+           t = (t + half_size.x) / bounds.size.width;
+        } else {
+           t = (t + half_size.y) / bounds.size.height;
+        }
+
+        // Adjust t based on the stop percentages
+        t = (t - background.colors[0].percentage) / (background.colors[1].percentage - background.colors[0].percentage);
+        t = clamp(t, 0.0, 1.0);
+
+        color = mix(color0, color1, t);
+        break;
+      }
+  }
+
+  return color;
 }
