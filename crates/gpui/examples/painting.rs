@@ -9,16 +9,29 @@ struct PaintingViewer {
     _painting: bool,
 }
 
+static DATA: &str = include_str!("./painting.json");
+
 impl PaintingViewer {
     fn new() -> Self {
         let mut lines = vec![];
+
+        let points = serde_json::from_str::<Vec<(f32, f32)>>(DATA).unwrap();
+        let mut path = Path::new(point(px(0.), px(89.411896)));
+        for p in points.iter() {
+            path.line_to(point(px(p.0), px(p.1)));
+        }
+        // Reverse the to close paths
+        for p in points.iter().rev() {
+            path.line_to(point(px(p.0), px(p.1)) + point(px(1.5), px(1.5)));
+        }
+        lines.push(path);
 
         // draw a line
         let mut path = Path::new(point(px(50.), px(180.)));
         path.line_to(point(px(100.), px(120.)));
         // go back to close the path
-        path.line_to(point(px(100.), px(121.)));
-        path.line_to(point(px(50.), px(181.)));
+        path.line_to(point(px(100.5), px(120.5)));
+        path.line_to(point(px(50.5), px(180.5)));
         lines.push(path);
 
         // draw a lightening bolt ⚡
@@ -48,7 +61,7 @@ impl PaintingViewer {
         };
         let height = square_bounds.size.height;
         let horizontal_offset = height;
-        let vertical_offset = px(30.);
+        let vertical_offset = px(5.);
         let mut path = Path::new(square_bounds.lower_left());
         path.curve_to(
             square_bounds.origin + point(horizontal_offset, vertical_offset),
