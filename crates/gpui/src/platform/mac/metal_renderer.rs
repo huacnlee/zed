@@ -309,11 +309,27 @@ impl MetalRenderer {
             return;
         };
 
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_texture_type(metal::MTLTextureType::D2Multisample);
+        descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_width(viewport_size.width.0 as u64);
+        descriptor.set_height(viewport_size.height.0 as u64);
+        descriptor.set_sample_count(4);
+        descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+        descriptor.set_usage(metal::MTLTextureUsage::RenderTarget);
+
+        let msaa_textur = self.device.new_texture(&descriptor);
+
         loop {
             let mut instance_buffer = self.instance_buffer_pool.lock().acquire(&self.device);
 
-            let command_buffer =
-                self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size);
+            let command_buffer = self.draw_primitives(
+                scene,
+                &mut instance_buffer,
+                drawable,
+                viewport_size,
+                &msaa_textur,
+            );
 
             match command_buffer {
                 Ok(command_buffer) => {
@@ -364,6 +380,7 @@ impl MetalRenderer {
         instance_buffer: &mut InstanceBuffer,
         drawable: &metal::MetalDrawableRef,
         viewport_size: Size<DevicePixels>,
+        msaa_texture: &metal::Texture,
     ) -> Result<metal::CommandBuffer> {
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
@@ -384,9 +401,11 @@ impl MetalRenderer {
             .object_at(0)
             .unwrap();
 
-        color_attachment.set_texture(Some(drawable.texture()));
+        color_attachment.set_texture(Some(msaa_texture));
+        color_attachment.set_resolve_texture(Some(drawable.texture()));
+        // color_attachment.set_texture(Some(drawable.texture()));
         color_attachment.set_load_action(metal::MTLLoadAction::Clear);
-        color_attachment.set_store_action(metal::MTLStoreAction::Store);
+        color_attachment.set_store_action(metal::MTLStoreAction::MultisampleResolve);
         let alpha = if self.layer.is_opaque() { 1. } else { 0. };
         color_attachment.set_clear_color(metal::MTLClearColor::new(0., 0., 0., alpha));
         let command_encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
@@ -1148,6 +1167,8 @@ fn build_pipeline_state(
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
 
+    descriptor.set_sample_count(4);
+
     device
         .new_render_pipeline_state(&descriptor)
         .expect("could not create render pipeline state")
@@ -1181,6 +1202,8 @@ fn build_path_rasterization_pipeline_state(
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+
+    descriptor.set_sample_count(4);
 
     device
         .new_render_pipeline_state(&descriptor)

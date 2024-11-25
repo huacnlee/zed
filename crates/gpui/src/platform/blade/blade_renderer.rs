@@ -76,6 +76,7 @@ pub unsafe fn new_renderer(
                 depth: 1,
             },
             transparent,
+            sample_count: 4,
         },
     )
 }
@@ -352,6 +353,7 @@ impl BladePipelines {
 pub struct BladeSurfaceConfig {
     pub size: gpu::Extent,
     pub transparent: bool,
+    pub sample_count: u32,
 }
 
 pub struct BladeRenderer {
