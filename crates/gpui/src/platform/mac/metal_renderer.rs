@@ -315,6 +315,7 @@ impl MetalRenderer {
         descriptor.set_width(viewport_size.width.0 as u64);
         descriptor.set_height(viewport_size.height.0 as u64);
         descriptor.set_sample_count(4);
+        descriptor.set_mipmap_level_count(1);
         descriptor.set_storage_mode(metal::MTLStorageMode::Private);
         descriptor.set_usage(metal::MTLTextureUsage::RenderTarget);
 
@@ -1157,6 +1158,8 @@ fn build_pipeline_state(
     descriptor.set_label(label);
     descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
     descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    descriptor.set_sample_count(4);
+
     let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
     color_attachment.set_pixel_format(pixel_format);
     color_attachment.set_blending_enabled(true);
@@ -1166,8 +1169,6 @@ fn build_pipeline_state(
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
-
-    descriptor.set_sample_count(4);
 
     device
         .new_render_pipeline_state(&descriptor)
@@ -1193,17 +1194,19 @@ fn build_path_rasterization_pipeline_state(
     descriptor.set_label(label);
     descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
     descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    descriptor.set_input_primitive_topology(metal::MTLPrimitiveTopologyClass::Triangle);
+    descriptor.set_sample_count(4);
+    descriptor.set_alpha_to_coverage_enabled(false);
+
     let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
     color_attachment.set_pixel_format(pixel_format);
-    color_attachment.set_blending_enabled(true);
+    color_attachment.set_blending_enabled(false);
     color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
-
-    descriptor.set_sample_count(4);
 
     device
         .new_render_pipeline_state(&descriptor)
