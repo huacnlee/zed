@@ -1,9 +1,9 @@
 use gpui::{
-    canvas, div, point, prelude::*, px, size, App, AppContext, Bounds, MouseDownEvent, Path,
+    canvas, div, point, prelude::*, px, size, App, AppContext, Bounds, Hsla, MouseDownEvent, Path,
     Pixels, Point, Render, ViewContext, WindowOptions,
 };
 struct PaintingViewer {
-    default_lines: Vec<Path<Pixels>>,
+    default_lines: Vec<(Path<Pixels>, Hsla)>,
     lines: Vec<Vec<Point<Pixels>>>,
     start: Point<Pixels>,
     _painting: bool,
@@ -14,33 +14,45 @@ impl PaintingViewer {
         let mut lines = vec![];
 
         // draw a line
-        let mut path = Path::new(point(px(50.), px(180.)));
-        path.line_to(point(px(100.), px(120.)));
-        // go back to close the path
-        path.line_to(point(px(100.), px(121.)));
-        path.line_to(point(px(50.), px(181.)));
-        lines.push(path);
+        let mut path = Path::new(point(px(20.), px(100.)));
+        path.line_to(point(px(50.), px(160.)));
+        path.line_to(point(px(60.), px(100.)));
+        path.line_to(point(px(60.5), px(101.)));
+        path.line_to(point(px(51.), px(160.)));
+        path.line_to(point(px(21.), px(100.)));
+        lines.push((path, gpui::black()));
+
+        // draw a triangle
+        let mut path = Path::new(point(px(25.), px(0.)));
+        path.line_to(point(px(50.), px(50.)));
+        path.line_to(point(px(0.), px(50.)));
+        path.translate(point(px(100.), px(100.)));
+        lines.push((path, gpui::red()));
 
         // draw a lightening bolt ⚡
-        let mut path = Path::new(point(px(150.), px(200.)));
-        path.line_to(point(px(200.), px(125.)));
-        path.line_to(point(px(200.), px(175.)));
-        path.line_to(point(px(250.), px(100.)));
-        lines.push(path);
+        let mut path = Path::new(point(px(-50.), px(50.)));
+        path.line_to(point(px(0.), px(-25.)));
+        path.line_to(point(px(0.), px(0.)));
+        path.move_to(point(px(0.), px(0.)));
+        path.line_to(point(px(50.), px(-50.)));
+        path.line_to(point(px(0.), px(25.)));
+        path.line_to(point(px(0.), px(5.)));
+        path.translate(point(px(220.), px(150.)));
+        lines.push((path, gpui::blue()));
 
         // draw a ⭐
-        let mut path = Path::new(point(px(350.), px(100.)));
-        path.line_to(point(px(370.), px(160.)));
-        path.line_to(point(px(430.), px(160.)));
-        path.line_to(point(px(380.), px(200.)));
-        path.line_to(point(px(400.), px(260.)));
-        path.line_to(point(px(350.), px(220.)));
-        path.line_to(point(px(300.), px(260.)));
-        path.line_to(point(px(320.), px(200.)));
-        path.line_to(point(px(270.), px(160.)));
-        path.line_to(point(px(330.), px(160.)));
-        path.line_to(point(px(350.), px(100.)));
-        lines.push(path);
+        let mut path = Path::new(point(px(76.8), px(116.864)));
+        path.line_to(point(px(31.6608), px(142.1312)));
+        path.line_to(point(px(41.7408), px(91.392)));
+        path.line_to(point(px(3.7568), px(56.2688)));
+        path.line_to(point(px(55.1296), px(50.176)));
+        path.line_to(point(px(76.8), px(3.2)));
+        path.line_to(point(px(98.4704), px(50.176)));
+        path.line_to(point(px(149.8432), px(56.2688)));
+        path.line_to(point(px(111.8592), px(91.392)));
+        path.line_to(point(px(121.9392), px(142.1312)));
+        path.translate(point(px(270.), px(80.)));
+        lines.push((path, gpui::yellow()));
 
         let square_bounds = Bounds {
             origin: point(px(450.), px(100.)),
@@ -59,8 +71,7 @@ impl PaintingViewer {
             square_bounds.lower_right(),
             square_bounds.upper_right() + point(px(0.0), vertical_offset),
         );
-        path.line_to(square_bounds.lower_left());
-        lines.push(path);
+        lines.push((path, gpui::green()));
 
         Self {
             default_lines: lines.clone(),
@@ -115,9 +126,9 @@ impl Render for PaintingViewer {
                         canvas(
                             move |_, _| {},
                             move |_, _, cx| {
-                                const STROKE_WIDTH: Pixels = px(2.0);
-                                for path in default_lines {
-                                    cx.paint_path(path, gpui::black());
+                                const STROKE_WIDTH: Pixels = px(1.0);
+                                for (path, color) in default_lines {
+                                    cx.paint_path(path, color);
                                 }
                                 for points in lines {
                                     let mut path = Path::new(points[0]);
@@ -127,11 +138,12 @@ impl Render for PaintingViewer {
 
                                     let mut last = points.last().unwrap();
                                     for p in points.iter().rev() {
-                                        let mut offset_x = px(0.);
-                                        if last.x == p.x {
-                                            offset_x = STROKE_WIDTH;
-                                        }
-                                        path.line_to(point(p.x + offset_x, p.y  + STROKE_WIDTH));
+                                        let dx = p.x - last.x;
+                                        let dy = p.y - last.y;
+                                        let distance = (dx * dx + dy * dy).0.sqrt();
+                                        let offset_x = (STROKE_WIDTH  * dy / distance).clamp(px(0.0), STROKE_WIDTH);
+                                        let offset_y = (STROKE_WIDTH  * dx / distance).clamp(px(0.0), STROKE_WIDTH);
+                                        path.line_to(point(p.x + offset_x, p.y - offset_y));
                                         last = p;
                                     }
 

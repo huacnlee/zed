@@ -3,6 +3,7 @@ use crate::{
     point, size, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, ContentMask, DevicePixels,
     Hsla, MonochromeSprite, PaintSurface, Path, PathId, PathVertex, PolychromeSprite,
     PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, Surface, Underline,
+    PATH_SUBPIXEL_VARIANTS,
 };
 use anyhow::{anyhow, Result};
 use block::ConcreteBlock;
@@ -733,12 +734,18 @@ impl MetalRenderer {
             if let Some((path, tile)) = paths_and_tiles.peek() {
                 if prev_texture_id.map_or(true, |texture_id| texture_id == tile.texture_id) {
                     prev_texture_id = Some(tile.texture_id);
-                    let origin = path.bounds.intersect(&path.content_mask.bounds).origin;
+                    let origin = path
+                        .bounds
+                        .intersect(&path.content_mask.bounds)
+                        .origin
+                        .map(|p| (p / PATH_SUBPIXEL_VARIANTS).floor());
+                    let size = tile
+                        .bounds
+                        .size
+                        .map(|s| s / PATH_SUBPIXEL_VARIANTS as i32)
+                        .map(Into::into);
                     sprites.push(PathSprite {
-                        bounds: Bounds {
-                            origin: origin.map(|p| p.floor()),
-                            size: tile.bounds.size.map(Into::into),
-                        },
+                        bounds: Bounds { origin, size },
                         color: path.color,
                         tile: (*tile).clone(),
                     });

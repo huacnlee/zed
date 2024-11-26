@@ -14,7 +14,7 @@ use crate::{
     TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement, TransformationMatrix, Underline,
     UnderlineStyle, View, VisualContext, WeakView, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    SUBPIXEL_VARIANTS,
+    PATH_SUBPIXEL_VARIANTS, SUBPIXEL_VARIANTS,
 };
 use anyhow::{anyhow, Context as _, Result};
 use collections::{FxHashMap, FxHashSet};
@@ -2330,7 +2330,7 @@ impl<'a> WindowContext<'a> {
         self.window
             .next_frame
             .scene
-            .insert_primitive(path.scale(scale_factor));
+            .insert_primitive(path.scale(scale_factor * PATH_SUBPIXEL_VARIANTS));
     }
 
     /// Paint an underline into the scene for the next frame at the current z-index.
