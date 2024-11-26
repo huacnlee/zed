@@ -7,6 +7,9 @@ use crate::{
 };
 use std::{fmt::Debug, iter::Peekable, ops::Range, slice};
 
+/// Subpixel variants for antialiasing for Path render.
+pub(crate) const PATH_SUBPIXEL_VARIANTS: f32 = 2.0;
+
 #[allow(non_camel_case_types, unused)]
 pub(crate) type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 
@@ -785,11 +788,18 @@ impl Path<Pixels> {
                 .iter()
                 .map(|vertex| vertex.scale(factor))
                 .collect(),
-            start: self.start.map(|start| start.scale(factor)),
+            start: self.start.scale(factor),
             current: self.current.scale(factor),
             contour_count: self.contour_count,
             color: self.color,
         }
+    }
+
+    /// Move the current point of the path to the given point.
+    pub fn move_to(&mut self, to: Point<Pixels>) {
+        self.start = to;
+        self.current = to;
+        self.contour_count = 0;
     }
 
     /// Draw a straight line from the current point to the given point.
@@ -819,6 +829,17 @@ impl Path<Pixels> {
             (point(0., 0.), point(0.5, 0.), point(1., 1.)),
         );
         self.current = to;
+    }
+
+    /// Translate path by the given offset.
+    pub fn translate(&mut self, offset: Point<Pixels>) {
+        self.start = self.start + offset;
+        self.current = self.current + offset;
+        self.bounds.origin = self.bounds.origin + offset;
+        self.content_mask.bounds.origin = self.content_mask.bounds.origin + offset;
+        for vertex in &mut self.vertices {
+            vertex.xy_position = vertex.xy_position + offset;
+        }
     }
 
     fn push_triangle(

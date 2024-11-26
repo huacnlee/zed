@@ -5,7 +5,7 @@ use super::{BladeAtlas, PATH_TEXTURE_FORMAT};
 use crate::{
     AtlasTextureKind, AtlasTile, Bounds, ContentMask, DevicePixels, GPUSpecs, Hsla,
     MonochromeSprite, Path, PathId, PathVertex, PolychromeSprite, PrimitiveBatch, Quad,
-    ScaledPixels, Scene, Shadow, Size, Underline,
+    ScaledPixels, Scene, Shadow, Size, Underline, PATH_SUBPIXEL_VARIANTS,
 };
 use bytemuck::{Pod, Zeroable};
 use collections::HashMap;
@@ -622,12 +622,19 @@ impl BladeRenderer {
                         for path in paths {
                             let tile = &self.path_tiles[&path.id];
                             let tex_info = self.atlas.get_texture_info(tile.texture_id);
-                            let origin = path.bounds.intersect(&path.content_mask.bounds).origin;
+                            let origin = path
+                                .bounds
+                                .intersect(&path.content_mask.bounds)
+                                .origin
+                                .map(|p| (p / PATH_SUBPIXEL_VARIANTS).floor());
+                            let size = tile
+                                .bounds
+                                .size
+                                .map(|s| s / PATH_SUBPIXEL_VARIANTS as i32)
+                                .map(Into::into);
+
                             let sprites = [PathSprite {
-                                bounds: Bounds {
-                                    origin: origin.map(|p| p.floor()),
-                                    size: tile.bounds.size.map(Into::into),
-                                },
+                                bounds: Bounds { origin, size },
                                 color: path.color,
                                 tile: (*tile).clone(),
                             }];
