@@ -16,8 +16,8 @@ impl PaintingViewer {
         // draw a line
         let mut path = Path::new(point(px(20.), px(100.)));
         path.line_to(point(px(50.), px(160.)));
-        path.line_to(point(px(60.), px(100.)));
-        path.line_to(point(px(60.5), px(101.)));
+        path.line_to(point(px(80.), px(100.)));
+        path.line_to(point(px(80.5), px(100.5)));
         path.line_to(point(px(51.), px(160.)));
         path.line_to(point(px(21.), px(100.)));
         lines.push((path, gpui::black()));
@@ -54,6 +54,21 @@ impl PaintingViewer {
         path.translate(point(px(270.), px(80.)));
         lines.push((path, gpui::yellow()));
 
+        // draw double square
+        // https://yqnn.github.io/svg-path-editor/#P=M_2_1_L_2_3_L_4_3_L_4_4_L_6_4_L_6_2_L_4_2_L_4_1_L_2_1
+        let mut path = Path::new(point(px(0.), px(50.)));
+        path.line_to(point(px(0.), px(150.)));
+        path.line_to(point(px(100.), px(150.)));
+        path.line_to(point(px(100.), px(200.)));
+        path.line_to(point(px(200.), px(200.)));
+        path.line_to(point(px(200.), px(100.)));
+        path.line_to(point(px(100.), px(100.)));
+        path.line_to(point(px(100.), px(50.)));
+        path.line_to(point(px(0.), px(50.)));
+        path.translate(point(px(20.), px(200.)));
+        lines.push((path, gpui::black()));
+
+        // draw a square with rounded corners
         let square_bounds = Bounds {
             origin: point(px(450.), px(100.)),
             size: size(px(200.), px(80.)),
