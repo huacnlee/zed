@@ -36,6 +36,11 @@ impl Render for WebViewWindow {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        #[cfg(target_os = "linux")]
+        {
+            gtk::init().unwrap();
+        }
+
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         let window = cx
             .open_window(
