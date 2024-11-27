@@ -101,6 +101,107 @@ impl PaintingViewer {
         cx.notify();
     }
 }
+
+fn build_line_path(points: Vec<Point<Pixels>>, width: f32) -> Path<Pixels> {
+    let mut path = Path::new(point(points[0].x, points[0].y));
+    let half_width = width / 2.0;
+    let angle_threshold: f32 = 15.;
+    // 4~6 for performance, 8~12 for medium, 16~24 for high quality
+    const SEGMENT: usize = 0;
+    let angle_threshold_cos = angle_threshold.to_radians().cos();
+
+    for i in 0..points.len() - 1 {
+        let p0 = points[i];
+        let p1 = points[i + 1];
+
+        // Calculate direction vector and normal
+        let dx = p1.x - p0.x;
+        let dy = p1.y - p0.y;
+        let length = (dx * dx + dy * dy).0.sqrt();
+        let dir = [dx / length, dy / length];
+        let normal = [-dir[1] * half_width, dir[0] * half_width];
+
+        // Current segment boundary vertices
+        let left0 = [p0.x - normal[0], p0.y - normal[1]];
+        let right0 = [p0.x + normal[0], p0.y + normal[1]];
+        let left1 = [p1.x - normal[0], p1.y - normal[1]];
+        let right1 = [p1.x + normal[0], p1.y + normal[1]];
+
+        // Add main triangles of the current segment
+        path.move_to(point(left0[0], left0[1]));
+        path.line_to(point(right0[0], right0[1]));
+        path.line_to(point(left1[0], left1[1]));
+
+        path.move_to(point(right0[0], right0[1]));
+        path.line_to(point(right1[0], right1[1]));
+        path.line_to(point(left1[0], left1[1]));
+
+        // Corner handling
+        if i < points.len() - 2 {
+            let p2 = points[i + 2];
+
+            // Previous and next direction vectors
+            let next_length = ((p2.x - p1.x).0.powi(2) + (p2.y - p1.y).0.powi(2)).sqrt();
+            let prev_dir = [dir[0], dir[1]];
+            let next_dir = [(p2.x - p1.x) / next_length, (p2.y - p1.y) / next_length];
+
+            // Calculate angle
+            let cos_angle = prev_dir[0] * next_dir[0] + prev_dir[1] * next_dir[1];
+
+            if cos_angle.0 < -0.99 {
+                // 180 degree turn: fill intersection area
+                path.line_to(point(p1.x - normal[0], p1.y - normal[1]));
+                path.line_to(point(p1.x + normal[0], p1.y + normal[1]));
+                continue;
+            } else if cos_angle.0 > angle_threshold_cos {
+                // Sharp angle: fill intersection area, generate polygon cover
+                let mut intersection_points = vec![
+                    [p1.x + normal[0], p1.y + normal[1]],
+                    [p1.x - normal[0], p1.y - normal[1]],
+                ];
+                let step = (1.0 - cos_angle.0) * (std::f32::consts::PI / 2.0) / SEGMENT as f32;
+                for j in 0..=SEGMENT {
+                    let theta = j as f32 * step;
+                    let rotated = [
+                        prev_dir[0] * theta.cos() - prev_dir[1] * theta.sin(),
+                        prev_dir[0] * theta.sin() + prev_dir[1] * theta.cos(),
+                    ];
+                    let rounded_vertex = [
+                        p1.x + rotated[0] * half_width,
+                        p1.y + rotated[1] * half_width,
+                    ];
+                    intersection_points.push(rounded_vertex);
+                }
+                for k in 1..intersection_points.len() - 1 {
+                    path.move_to(point(intersection_points[0][0], intersection_points[0][1]));
+                    path.line_to(point(intersection_points[k][0], intersection_points[k][1]));
+                    path.line_to(point(
+                        intersection_points[k + 1][0],
+                        intersection_points[k + 1][1],
+                    ));
+                }
+            } else {
+                // Regular corner handling
+                let step = (std::f32::consts::PI - cos_angle.0.acos()) / SEGMENT as f32;
+                for j in 0..=SEGMENT {
+                    let theta = j as f32 * step;
+                    let rotated = [
+                        prev_dir[0] * theta.cos() - prev_dir[1] * theta.sin(),
+                        prev_dir[0] * theta.sin() + prev_dir[1] * theta.cos(),
+                    ];
+                    let rounded_vertex = [
+                        p1.x + rotated[0] * half_width,
+                        p1.y + rotated[1] * half_width,
+                    ];
+                    path.line_to(point(rounded_vertex[0], rounded_vertex[1]));
+                }
+            }
+        }
+    }
+
+    path
+}
+
 impl Render for PaintingViewer {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         let default_lines = self.default_lines.clone();
@@ -141,27 +242,11 @@ impl Render for PaintingViewer {
                         canvas(
                             move |_, _| {},
                             move |_, _, cx| {
-                                const STROKE_WIDTH: Pixels = px(1.0);
                                 for (path, color) in default_lines {
                                     cx.paint_path(path, color);
                                 }
                                 for points in lines {
-                                    let mut path = Path::new(points[0]);
-                                    for p in points.iter().skip(1) {
-                                        path.line_to(*p);
-                                    }
-
-                                    let mut last = points.last().unwrap();
-                                    for p in points.iter().rev() {
-                                        let dx = p.x - last.x;
-                                        let dy = p.y - last.y;
-                                        let distance = (dx * dx + dy * dy).0.sqrt();
-                                        let offset_x = (STROKE_WIDTH  * dy / distance).clamp(px(0.0), STROKE_WIDTH);
-                                        let offset_y = (STROKE_WIDTH  * dx / distance).clamp(px(0.0), STROKE_WIDTH);
-                                        path.line_to(point(p.x + offset_x, p.y - offset_y));
-                                        last = p;
-                                    }
-
+                                    let path = build_line_path(points, 1.5);
                                     cx.paint_path(path, gpui::black());
                                 }
                             },
