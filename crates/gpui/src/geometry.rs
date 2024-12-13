@@ -2475,6 +2475,7 @@ impl From<usize> for Pixels {
     Copy,
     Default,
     Div,
+    Mul,
     Eq,
     Hash,
     Ord,
