@@ -3,6 +3,7 @@ use gpui::{
     canvas, div, point, prelude::*, px, size, App, AppContext, Bounds, MouseDownEvent, Path,
     Pixels, Point, Render, ViewContext, WindowOptions,
 };
+use usvg::tiny_skia_path::PathVerb;
 struct PaintingViewer {
     default_lines: Vec<Path<Pixels>>,
     lines: Vec<Vec<Point<Pixels>>>,
@@ -64,7 +65,7 @@ impl PaintingViewer {
         lines.push(path);
         let stroke = epaint::Stroke::new(0., epaint::Color32::BLACK);
 
-        let points = vec![
+        let points = [
             pos2(350., 100.),
             pos2(370., 160.),
             pos2(430., 160.),
@@ -77,10 +78,21 @@ impl PaintingViewer {
             pos2(330., 160.),
         ];
 
-        let path_shape = epaint::Shape::convex_polygon(points, epaint::Color32::BLUE, stroke);
+        // let path_shape = epaint::Shape::convex_polygon(points, epaint::Color32::BLUE, stroke);
+        // let mut path = Path::new(point(px(0.), px(0.)));
+        // for v in tessellate_path(&path_shape) {
+        //     path.push_vertice(point(px(v.pos.x), px(v.pos.y)), point(v.uv.x, 1. - v.uv.y));
+        // }
+        // lines.push(path);
+
+        let mut builder = lyon::path::Path::builder().with_svg();
+        lyon_extra::rust_logo::build_logo_path(&mut builder);
+        builder.close();
+        let path = builder.build();
+        let buf = lyon_tessellate_path(&path);
         let mut path = Path::new(point(px(0.), px(0.)));
-        for v in tessellate_path(&path_shape) {
-            path.push_vertice(point(px(v.pos.x), px(v.pos.y)), point(v.uv.x, 1. - v.uv.y));
+        for v in buf.vertices {
+            path.push_vertex(v.pos, v.st);
         }
         lines.push(path);
 
@@ -96,6 +108,37 @@ impl PaintingViewer {
         self.lines.clear();
         cx.notify();
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct MyVertex {
+    pos: Point<Pixels>,
+    st: Point<f32>,
+}
+
+fn lyon_tessellate_path(
+    path: &lyon::path::Path,
+) -> lyon::tessellation::VertexBuffers<MyVertex, u16> {
+    use lyon::*;
+    use lyon_tessellation::*;
+
+    // Will contain the result of the tessellation.
+    let mut geometry: VertexBuffers<MyVertex, u16> = VertexBuffers::new();
+    let mut tessellator = StrokeTessellator::new();
+
+    // Compute the tessellation.
+    tessellator
+        .tessellate_path(
+            path,
+            &StrokeOptions::default(),
+            &mut BuffersBuilder::new(&mut geometry, |vertex: StrokeVertex| MyVertex {
+                pos: point(px(vertex.position().x), px(vertex.position().y)),
+                st: point(0., 1.),
+            }),
+        )
+        .unwrap();
+
+    geometry
 }
 
 fn tessellate_path(shape: &epaint::Shape) -> Vec<epaint::Vertex> {

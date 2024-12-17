@@ -744,8 +744,8 @@ impl Path<Pixels> {
         self.current = to;
     }
 
-    /// Push vertice
-    pub fn push_vertice(&mut self, xy: Point<Pixels>, st: Point<f32>) {
+    /// Push vertex
+    pub fn push_vertex(&mut self, xy: Point<Pixels>, st: Point<f32>) {
         self.vertices.push(PathVertex {
             xy_position: xy,
             st_position: st,

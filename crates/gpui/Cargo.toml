@@ -118,6 +118,8 @@ util = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
 unicode-segmentation.workspace = true
 epaint = "0.30.0"
+lyon = "1.0.1"
+lyon_extra = "1.0.3"
 
 [build-dependencies]
 embed-resource = "3.0"
