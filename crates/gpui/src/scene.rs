@@ -744,6 +744,19 @@ impl Path<Pixels> {
         self.current = to;
     }
 
+    /// Push vertice
+    pub fn push_vertice(&mut self, p: Point<Pixels>) {
+        self.vertices.push(PathVertex {
+            xy_position: p,
+            st_position: point(0., 1.),
+            content_mask: Default::default(),
+        });
+        self.bounds = self.bounds.union(&Bounds {
+            origin: p,
+            size: Default::default(),
+        });
+    }
+
     fn push_triangle(
         &mut self,
         xy: (Point<Pixels>, Point<Pixels>, Point<Pixels>),

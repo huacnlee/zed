@@ -1,3 +1,4 @@
+use epaint::pos2;
 use gpui::{
     canvas, div, point, prelude::*, px, size, App, AppContext, Bounds, MouseDownEvent, Path,
     Pixels, Point, Render, ViewContext, WindowOptions,
@@ -40,7 +41,7 @@ impl PaintingViewer {
         path.line_to(point(px(270.), px(160.)));
         path.line_to(point(px(330.), px(160.)));
         path.line_to(point(px(350.), px(100.)));
-        lines.push(path);
+        // lines.push(path);
 
         let square_bounds = Bounds {
             origin: point(px(450.), px(100.)),
@@ -60,6 +61,37 @@ impl PaintingViewer {
             square_bounds.upper_right() + point(px(0.0), vertical_offset),
         );
         path.line_to(square_bounds.lower_left());
+        lines.push(path);
+
+        let points = vec![
+            pos2(350., 100.),
+            pos2(370., 160.),
+            pos2(430., 160.),
+            pos2(380., 200.),
+            pos2(400., 260.),
+            pos2(350., 220.),
+            pos2(300., 260.),
+            pos2(320., 200.),
+            pos2(270., 160.),
+            pos2(330., 160.),
+        ];
+        let stroke = epaint::Stroke::new(1., epaint::Color32::BLACK);
+        let path_shape = epaint::PathShape::closed_line(points, stroke);
+        let atlas = epaint::TextureAtlas::new([4096, 256]);
+        let font_tex_size = atlas.size();
+        let prepared_discs = atlas.prepared_discs();
+        let mut tessellator = epaint::Tessellator::new(
+            2.0,
+            epaint::TessellationOptions::default(),
+            font_tex_size,
+            prepared_discs,
+        );
+        let mut mesh = epaint::Mesh::default();
+        tessellator.tessellate_path(&path_shape, &mut mesh);
+        let mut path = Path::new(point(px(350.), px(100.)));
+        for v in mesh.vertices.iter() {
+            path.push_vertice(point(px(v.pos.x), px(v.pos.y)));
+        }
         lines.push(path);
 
         Self {
