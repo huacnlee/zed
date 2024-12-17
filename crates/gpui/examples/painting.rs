@@ -62,6 +62,7 @@ impl PaintingViewer {
         );
         path.line_to(square_bounds.lower_left());
         lines.push(path);
+        let stroke = epaint::Stroke::new(0., epaint::Color32::BLACK);
 
         let points = vec![
             pos2(350., 100.),
@@ -75,22 +76,11 @@ impl PaintingViewer {
             pos2(270., 160.),
             pos2(330., 160.),
         ];
-        let stroke = epaint::Stroke::new(1., epaint::Color32::BLACK);
-        let path_shape = epaint::PathShape::closed_line(points, stroke);
-        let atlas = epaint::TextureAtlas::new([4096, 256]);
-        let font_tex_size = atlas.size();
-        let prepared_discs = atlas.prepared_discs();
-        let mut tessellator = epaint::Tessellator::new(
-            2.0,
-            epaint::TessellationOptions::default(),
-            font_tex_size,
-            prepared_discs,
-        );
-        let mut mesh = epaint::Mesh::default();
-        tessellator.tessellate_path(&path_shape, &mut mesh);
-        let mut path = Path::new(point(px(350.), px(100.)));
-        for v in mesh.vertices.iter() {
-            path.push_vertice(point(px(v.pos.x), px(v.pos.y)));
+
+        let path_shape = epaint::Shape::convex_polygon(points, epaint::Color32::BLUE, stroke);
+        let mut path = Path::new(point(px(0.), px(0.)));
+        for v in tessellate_path(&path_shape) {
+            path.push_vertice(point(px(v.pos.x), px(v.pos.y)), point(v.uv.x, 1. - v.uv.y));
         }
         lines.push(path);
 
@@ -107,6 +97,23 @@ impl PaintingViewer {
         cx.notify();
     }
 }
+
+fn tessellate_path(shape: &epaint::Shape) -> Vec<epaint::Vertex> {
+    let atlas = epaint::TextureAtlas::new([4096, 256]);
+    let font_tex_size = atlas.size();
+    let prepared_discs = atlas.prepared_discs();
+    let mut tessellator = epaint::Tessellator::new(
+        1.0,
+        epaint::TessellationOptions::default(),
+        font_tex_size,
+        prepared_discs,
+    );
+    let mut mesh = epaint::Mesh::default();
+    tessellator.tessellate_shape(shape.clone(), &mut mesh);
+
+    mesh.vertices
+}
+
 impl Render for PaintingViewer {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         let default_lines = self.default_lines.clone();

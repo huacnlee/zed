@@ -745,14 +745,14 @@ impl Path<Pixels> {
     }
 
     /// Push vertice
-    pub fn push_vertice(&mut self, p: Point<Pixels>) {
+    pub fn push_vertice(&mut self, xy: Point<Pixels>, st: Point<f32>) {
         self.vertices.push(PathVertex {
-            xy_position: p,
-            st_position: point(0., 1.),
+            xy_position: xy,
+            st_position: st,
             content_mask: Default::default(),
         });
         self.bounds = self.bounds.union(&Bounds {
-            origin: p,
+            origin: xy,
             size: Default::default(),
         });
     }
