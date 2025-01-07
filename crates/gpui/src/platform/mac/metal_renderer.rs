@@ -524,16 +524,24 @@ impl MetalRenderer {
                 return None;
             }
 
+            let texture = self.sprite_atlas.metal_texture(texture_id);
+            let resolve_texture = self.sprite_atlas.resolve_texture(texture_id);
+
             let render_pass_descriptor = metal::RenderPassDescriptor::new();
             let color_attachment = render_pass_descriptor
                 .color_attachments()
                 .object_at(0)
                 .unwrap();
 
-            let texture = self.sprite_atlas.metal_texture(texture_id);
             color_attachment.set_texture(Some(&texture));
+            if let Some(resolve_texture) = resolve_texture {
+                color_attachment.set_resolve_texture(Some(&resolve_texture));
+                color_attachment.set_store_action(metal::MTLStoreAction::MultisampleResolve);
+            } else {
+                color_attachment.set_store_action(metal::MTLStoreAction::Store);
+            }
+
             color_attachment.set_load_action(metal::MTLLoadAction::Clear);
-            color_attachment.set_store_action(metal::MTLStoreAction::Store);
             color_attachment.set_clear_color(metal::MTLClearColor::new(0., 0., 0., 1.));
             let command_encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
             command_encoder.set_render_pipeline_state(&self.paths_rasterization_pipeline_state);
@@ -1138,6 +1146,7 @@ fn build_pipeline_state(
     descriptor.set_label(label);
     descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
     descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+
     let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
     color_attachment.set_pixel_format(pixel_format);
     color_attachment.set_blending_enabled(true);
@@ -1172,6 +1181,8 @@ fn build_path_rasterization_pipeline_state(
     descriptor.set_label(label);
     descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
     descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    descriptor.set_raster_sample_count(4);
+
     let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
     color_attachment.set_pixel_format(pixel_format);
     color_attachment.set_blending_enabled(true);

@@ -506,17 +506,25 @@ vertex PathSpriteVertexOutput path_sprite_vertex(
 fragment float4 path_sprite_fragment(
     PathSpriteVertexOutput input [[stage_in]],
     constant PathSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
-    texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
-  constexpr sampler atlas_texture_sampler(mag_filter::linear,
-                                          min_filter::linear);
-  float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
-  float mask = 1. - abs(1. - fmod(sample.r, 2.));
+    texture2d_ms<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
+  const uint sample_count = atlas_texture.get_num_samples();
+  float sample_total = 0.;
+  uint2 pixel = uint2(input.tile_position.xy);
+  for (uint i = 0; i < sample_count; ++i) {
+    const float4 sample = atlas_texture.read(pixel, i);
+    sample_total += sample.r;
+  }
+  float sample = sample_total / float(sample_count);
+  float mask = 1. - abs(1. - fmod(sample, 2.));
+
   PathSprite sprite = sprites[input.sprite_id];
   Background background = sprite.color;
   float4 color = gradient_color(background, input.position.xy, sprite.bounds,
     input.solid_color, input.color0, input.color1);
-  color.a *= mask;
+  color.r *= sample;
+  color.g *= sample;
+  color.b *= sample;
+  color.a *= sample;
   return color;
 }
 

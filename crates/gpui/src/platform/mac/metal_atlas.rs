@@ -27,6 +27,10 @@ impl MetalAtlas {
         self.0.lock().texture(id).metal_texture.clone()
     }
 
+    pub(crate) fn resolve_texture(&self, id: AtlasTextureId) -> Option<metal::Texture> {
+        self.0.lock().texture(id).resolve_texture.clone()
+    }
+
     pub(crate) fn allocate(
         &self,
         size: Size<DevicePixels>,
@@ -147,6 +151,7 @@ impl MetalAtlasState {
             width: DevicePixels(1024),
             height: DevicePixels(1024),
         };
+
         // Max texture size on all modern Apple GPUs. Anything bigger than that crashes in validateWithDevice.
         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(16384),
@@ -158,6 +163,7 @@ impl MetalAtlasState {
         texture_descriptor.set_height(size.height.into());
         let pixel_format;
         let usage;
+        let mut sample_count = None;
         match kind {
             AtlasTextureKind::Monochrome => {
                 pixel_format = metal::MTLPixelFormat::A8Unorm;
@@ -168,13 +174,38 @@ impl MetalAtlasState {
                 usage = metal::MTLTextureUsage::ShaderRead;
             }
             AtlasTextureKind::Path => {
-                pixel_format = metal::MTLPixelFormat::R16Float;
+                pixel_format = metal::MTLPixelFormat::BGRA8Unorm;
                 usage = metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead;
+
+                // https://developer.apple.com/documentation/metal/metal_sample_code_library/improving_edge-rendering_quality_with_multisample_antialiasing_msaa
+                for &count in [4, 2, 1].iter() {
+                    if self.device.supports_texture_sample_count(count) {
+                        sample_count = Some(count);
+                        break;
+                    }
+                }
             }
         }
+
         texture_descriptor.set_pixel_format(pixel_format);
         texture_descriptor.set_usage(usage);
+
         let metal_texture = self.device.new_texture(&texture_descriptor);
+
+        let resolve_texture = if sample_count.is_some() {
+            let mut resolve_texture_descriptor = texture_descriptor.clone();
+            resolve_texture_descriptor.set_texture_type(metal::MTLTextureType::D2);
+            resolve_texture_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+            Some(self.device.new_texture(&resolve_texture_descriptor))
+        } else {
+            None
+        };
+
+        if let Some(sample_count) = sample_count {
+            texture_descriptor.set_texture_type(metal::MTLTextureType::D2Multisample);
+            texture_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+            texture_descriptor.set_sample_count(sample_count);
+        }
 
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
@@ -191,6 +222,7 @@ impl MetalAtlasState {
             },
             allocator: etagere::BucketedAtlasAllocator::new(size.into()),
             metal_texture: AssertSend(metal_texture),
+            resolve_texture: AssertSend(resolve_texture),
             live_atlas_keys: 0,
         };
 
@@ -217,6 +249,7 @@ struct MetalAtlasTexture {
     id: AtlasTextureId,
     allocator: BucketedAtlasAllocator,
     metal_texture: AssertSend<metal::Texture>,
+    resolve_texture: AssertSend<Option<metal::Texture>>,
     live_atlas_keys: u32,
 }
 
