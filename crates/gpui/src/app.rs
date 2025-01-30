@@ -1,6 +1,6 @@
 use std::{
     any::{type_name, TypeId},
-    cell::{Ref, RefCell, RefMut},
+    cell::RefCell,
     marker::PhantomData,
     mem,
     ops::{Deref, DerefMut},
@@ -11,7 +11,6 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use derive_more::{Deref, DerefMut};
 use futures::{
     channel::oneshot,
     future::{LocalBoxFuture, Shared},
@@ -53,7 +52,7 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 /// Strongly consider removing after stabilization.
 #[doc(hidden)]
 pub struct AppCell {
-    app: RefCell<App>,
+    app: App,
 }
 
 impl AppCell {
@@ -64,7 +63,10 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        AppRef(self.app.borrow())
+        AppRef {
+            _mark: PhantomData,
+            app: &self.app as *const _,
+        }
     }
 
     #[doc(hidden)]
@@ -74,13 +76,26 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        AppRefMut(self.app.borrow_mut())
+        AppRefMut {
+            _mark: PhantomData,
+            app: &self.app as *const _ as *mut _,
+        }
     }
 }
 
 #[doc(hidden)]
-#[derive(Deref, DerefMut)]
-pub struct AppRef<'a>(Ref<'a, App>);
+pub struct AppRef<'a> {
+    _mark: PhantomData<&'a ()>,
+    app: *const App,
+}
+
+impl<'a> Deref for AppRef<'a> {
+    type Target = App;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.app }
+    }
+}
 
 impl<'a> Drop for AppRef<'a> {
     fn drop(&mut self) {
@@ -92,8 +107,24 @@ impl<'a> Drop for AppRef<'a> {
 }
 
 #[doc(hidden)]
-#[derive(Deref, DerefMut)]
-pub struct AppRefMut<'a>(RefMut<'a, App>);
+pub struct AppRefMut<'a> {
+    _mark: PhantomData<&'a ()>,
+    app: *mut App,
+}
+
+impl<'a> Deref for AppRefMut<'a> {
+    type Target = App;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.app }
+    }
+}
+
+impl<'a> DerefMut for AppRefMut<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.app }
+    }
+}
 
 impl<'a> Drop for AppRefMut<'a> {
     fn drop(&mut self) {
@@ -289,7 +320,7 @@ impl App {
         let keyboard_layout = SharedString::from(platform.keyboard_layout());
 
         let app = Rc::new_cyclic(|this| AppCell {
-            app: RefCell::new(App {
+            app: App {
                 this: this.clone(),
                 platform: platform.clone(),
                 text_system,
@@ -331,7 +362,7 @@ impl App {
 
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
                 name: None,
-            }),
+            },
         });
 
         init_app_menus(platform.as_ref(), &mut app.borrow_mut());
