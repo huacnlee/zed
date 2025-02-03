@@ -87,8 +87,8 @@ parking = "2.0.0"
 parking_lot.workspace = true
 postage.workspace = true
 profiling.workspace = true
-rand = { optional = true, workspace = true }
-raw-window-handle = "0.6"
+rand = { optional = true, workspace = true}
+raw-window-handle = { version = "0.6", features = ["std"] }
 refineable.workspace = true
 resvg = { version = "0.44.0", default-features = false }
 usvg = { version = "0.44.0", default-features = false }
@@ -109,6 +109,7 @@ util.workspace = true
 uuid.workspace = true
 waker-fn = "1.2.0"
 lyon = "1.0"
+wry = "0.41.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block = "0.1"
@@ -126,6 +127,9 @@ objc2 = { version = "0.5", optional = true }
 objc2-metal = { version = "0.2", optional = true }
 #TODO: replace with "objc2"
 metal.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gtk = "0.18.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))'.dependencies]
 pathfinder_geometry = "0.5"
@@ -260,6 +264,10 @@ path = "examples/text_wrapper.rs"
 [[example]]
 name = "uniform_list"
 path = "examples/uniform_list.rs"
+
+[[example]]
+name = 'webview'
+path = "examples/webview.rs"
 
 [[example]]
 name = "window_shadow"
