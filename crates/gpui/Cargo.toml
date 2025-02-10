@@ -58,7 +58,6 @@ x11 = [
     "open",
 ]
 
-
 [lib]
 path = "src/gpui.rs"
 doctest = false
@@ -88,7 +87,7 @@ parking_lot.workspace = true
 postage.workspace = true
 profiling.workspace = true
 rand = { optional = true, workspace = true }
-raw-window-handle = "0.6"
+raw-window-handle = { version = "0.6", features = ["std"] }
 refineable.workspace = true
 resvg = { version = "0.44.0", default-features = false }
 usvg = { version = "0.44.0", default-features = false }
@@ -126,6 +125,9 @@ objc2 = { version = "0.5", optional = true }
 objc2-metal = { version = "0.2", optional = true }
 #TODO: replace with "objc2"
 metal.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gtk = "0.18.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))'.dependencies]
 pathfinder_geometry = "0.5"
@@ -166,7 +168,6 @@ wayland-protocols-plasma = { version = "0.2.0", features = [
     "client",
 ], optional = true }
 
-
 # X11
 as-raw-xcb-connection = { version = "1", optional = true }
 x11rb = { version = "0.13.1", features = [
@@ -204,10 +205,7 @@ collections = { workspace = true, features = ["test-support"] }
 env_logger.workspace = true
 http_client = { workspace = true, features = ["test-support"] }
 lyon = { version = "1.0", features = ["extra"] }
-rand.workspace = true
-unicode-segmentation.workspace = true
-reqwest_client = { workspace = true, features = ["test-support"] }
-util = { workspace = true, features = ["test-support"] }
+wry = "0.41.0"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 embed-resource = "3.0"
@@ -220,7 +218,6 @@ naga.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.build-dependencies]
 naga.workspace = true
-
 
 [[example]]
 name = "hello_world"
