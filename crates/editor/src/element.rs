@@ -4170,12 +4170,8 @@ impl EditorElement {
                             }
                         }
                         None => {
-                            let edges = Edges {
-                                top: px(1.),
-                                bottom: px(1.),
-                                ..Default::default()
-                            };
-                            current_paint = Some((new_background, new_row..new_row, edges))
+                            current_paint =
+                                Some((new_background, new_row..new_row, Edges::y(px(1.))))
                         }
                     };
                 }

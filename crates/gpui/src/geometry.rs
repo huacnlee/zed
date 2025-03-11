@@ -1687,6 +1687,24 @@ impl<T: Clone + Default + Debug> Edges<T> {
         }
     }
 
+    /// Constructs `Edges` where the left, right sides are set to specified value.
+    pub fn x(value: T) -> Self {
+        Self {
+            left: value.clone(),
+            right: value,
+            ..Default::default()
+        }
+    }
+
+    /// Constructs `Edges` where the top, bottom sides are set to specified value.
+    pub fn y(value: T) -> Self {
+        Self {
+            top: value.clone(),
+            bottom: value,
+            ..Default::default()
+        }
+    }
+
     /// Applies a function to each field of the `Edges`, producing a new `Edges<U>`.
     ///
     /// This method allows for converting an `Edges<T>` to an `Edges<U>` by specifying a closure
@@ -2025,7 +2043,7 @@ impl From<Pixels> for Edges<Pixels> {
 }
 
 /// Identifies a corner of a 2d box.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Corner {
     /// The top left corner
     TopLeft,
@@ -3428,5 +3446,36 @@ mod tests {
 
         // Test Case 3: Bounds intersecting with themselves
         assert!(bounds1.intersects(&bounds1));
+    }
+
+    #[test]
+    fn test_edges() {
+        assert_eq!(
+            Edges::all(10.),
+            Edges {
+                top: 10.,
+                right: 10.,
+                bottom: 10.,
+                left: 10.,
+            }
+        );
+        assert_eq!(
+            Edges::x(10.),
+            Edges {
+                top: 0.,
+                right: 10.,
+                bottom: 0.,
+                left: 10.,
+            }
+        );
+        assert_eq!(
+            Edges::y(10.),
+            Edges {
+                top: 10.,
+                right: 0.,
+                bottom: 10.,
+                left: 0.,
+            }
+        );
     }
 }
