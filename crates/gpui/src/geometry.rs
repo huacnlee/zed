@@ -1678,6 +1678,7 @@ impl<T: Clone + Default + Debug> Edges<T> {
     /// assert_eq!(uniform_edges.bottom, 10.0);
     /// assert_eq!(uniform_edges.left, 10.0);
     /// ```
+    #[inline]
     pub fn all(value: T) -> Self {
         Self {
             top: value.clone(),
@@ -1688,6 +1689,7 @@ impl<T: Clone + Default + Debug> Edges<T> {
     }
 
     /// Constructs `Edges` where the left, right sides are set to specified value.
+    #[inline]
     pub fn x(value: T) -> Self {
         Self {
             left: value.clone(),
@@ -1697,6 +1699,7 @@ impl<T: Clone + Default + Debug> Edges<T> {
     }
 
     /// Constructs `Edges` where the top, bottom sides are set to specified value.
+    #[inline]
     pub fn y(value: T) -> Self {
         Self {
             top: value.clone(),
