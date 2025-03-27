@@ -1,7 +1,7 @@
 use gpui::{
     canvas, div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, size, Application,
-    Background, Bounds, ColorSpace, Context, MouseDownEvent, Path, PathBuilder, PathStyle, Pixels,
-    Point, Render, StrokeOptions, Window, WindowOptions,
+    Background, Bounds, ColorSpace, Context, FillOptions, FillRule, MouseDownEvent, Path,
+    PathBuilder, PathStyle, Pixels, Point, Render, StrokeOptions, Window, WindowOptions,
 };
 
 struct PaintingViewer {
@@ -35,18 +35,16 @@ impl PaintingViewer {
         lines.push((path, rgb(0x1d4ed8).into()));
 
         // draw a ⭐
-        let mut builder = PathBuilder::fill();
+        // Reference:
+        // https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/fill-rule
+        let mut builder = PathBuilder::default().with_style(PathStyle::Fill(
+            FillOptions::default().with_fill_rule(FillRule::NonZero),
+        ));
         builder.move_to(point(px(350.), px(100.)));
-        builder.line_to(point(px(370.), px(160.)));
-        builder.line_to(point(px(430.), px(160.)));
-        builder.line_to(point(px(380.), px(200.)));
-        builder.line_to(point(px(400.), px(260.)));
-        builder.line_to(point(px(350.), px(220.)));
-        builder.line_to(point(px(300.), px(260.)));
-        builder.line_to(point(px(320.), px(200.)));
-        builder.line_to(point(px(270.), px(160.)));
-        builder.line_to(point(px(330.), px(160.)));
-        builder.line_to(point(px(350.), px(100.)));
+        builder.line_to(point(px(321.), px(190.)));
+        builder.line_to(point(px(398.), px(135.)));
+        builder.line_to(point(px(302.), px(135.)));
+        builder.line_to(point(px(379.), px(190.)));
         let path = builder.build().unwrap();
         lines.push((
             path,
