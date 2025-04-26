@@ -486,6 +486,7 @@ impl BladeRenderer {
 
     #[profiling::function]
     fn rasterize_paths(&mut self, paths: &[Path<ScaledPixels>]) {
+        self.atlas.clear_textures(AtlasTextureKind::Path);
         self.path_tiles.clear();
         let mut vertices_by_texture_id = HashMap::default();
 
@@ -809,7 +810,6 @@ impl BladeRenderer {
         profiling::scope!("finish");
         self.instance_belt.flush(&sync_point);
         self.atlas.after_frame(&sync_point);
-        self.atlas.clear_textures(AtlasTextureKind::Path);
 
         self.wait_for_gpu();
         self.last_sync_point = Some(sync_point);
