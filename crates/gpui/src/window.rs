@@ -1050,6 +1050,10 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, _cx| {
                         for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
+                            println!(
+                                "hitbox: {:?}, window.mouse_hit_test.ids: {:?}",
+                                hitbox.id, window.mouse_hit_test.ids
+                            );
                             if window.mouse_hit_test.ids.contains(&hitbox.id) {
                                 return Some(*area);
                             }
