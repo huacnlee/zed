@@ -1,8 +1,8 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontStyle, FontWeight, Hsla,
-    JustifyContent, Length, SharedString, StrikethroughStyle, StyleRefinement, TextAlign,
-    TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
+    JustifyContent, Length, Refineable, SharedString, StrikethroughStyle, StyleRefinement,
+    TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -21,6 +21,12 @@ const ELLIPSIS: SharedString = SharedString::new_static("…");
 pub trait Styled: Sized {
     /// Returns a reference to the style memory of this element.
     fn style(&mut self) -> &mut StyleRefinement;
+
+    /// Refine the style of this element, applying the given style refinement.
+    fn refine_style(mut self, style: &StyleRefinement) -> Self {
+        self.style().refine(style);
+        self
+    }
 
     gpui_macros::style_helpers!();
     gpui_macros::visibility_style_methods!();

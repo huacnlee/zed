@@ -787,9 +787,8 @@ impl Element for MarkdownElement {
                                 heading,
                                 *level,
                                 self.style.heading_level_styles.as_ref(),
-                            );
-
-                            heading.style().refine(&self.style.heading);
+                            )
+                            .refine_style(&self.style.heading);
 
                             let text_style =
                                 self.style.heading.text_style().clone().unwrap_or_default();
@@ -877,7 +876,7 @@ impl Element for MarkdownElement {
 
                                     builder.push_div(parent_container, range, markdown_end);
 
-                                    let mut code_block = div()
+                                    let code_block = div()
                                         .id(("code-block", range.start))
                                         .rounded_b_lg()
                                         .map(|mut code_block| {
@@ -891,9 +890,8 @@ impl Element for MarkdownElement {
                                             } else {
                                                 code_block.w_full().overflow_hidden()
                                             }
-                                        });
-
-                                    code_block.style().refine(&self.style.code_block);
+                                        })
+                                        .refine_style(&self.style.code_block);
 
                                     if let Some(code_block_text_style) = &self.style.code_block.text
                                     {
