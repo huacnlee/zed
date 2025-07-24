@@ -14,6 +14,7 @@ use agent::{
     context_store::ContextStoreEvent,
 };
 use agent_settings::{AgentSettings, CompletionMode};
+use ai_onboarding::ApiKeysWithProviders;
 use buffer_diff::BufferDiff;
 use client::UserStore;
 use collections::{HashMap, HashSet};
@@ -33,7 +34,8 @@ use gpui::{
 };
 use language::{Buffer, Language, Point};
 use language_model::{
-    ConfiguredModel, LanguageModelRequestMessage, MessageContent, ZED_CLOUD_PROVIDER_ID,
+    ConfiguredModel, LanguageModelRegistry, LanguageModelRequestMessage, MessageContent,
+    ZED_CLOUD_PROVIDER_ID,
 };
 use multi_buffer;
 use project::Project;
@@ -65,6 +67,9 @@ use agent::{
     thread_store::{TextThreadStore, ThreadStore},
 };
 
+pub const MIN_EDITOR_LINES: usize = 4;
+pub const MAX_EDITOR_LINES: usize = 8;
+
 #[derive(RegisterComponent)]
 pub struct MessageEditor {
     thread: Entity<Thread>,
@@ -87,9 +92,6 @@ pub struct MessageEditor {
     update_token_count_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
-
-const MIN_EDITOR_LINES: usize = 4;
-const MAX_EDITOR_LINES: usize = 8;
 
 pub(crate) fn create_editor(
     workspace: WeakEntity<Workspace>,
@@ -623,7 +625,7 @@ impl MessageEditor {
             .unwrap_or(false);
 
         IconButton::new("follow-agent", IconName::Crosshair)
-            .disabled(is_model_selected)
+            .disabled(!is_model_selected)
             .icon_size(IconSize::Small)
             .icon_color(Color::Muted)
             .toggle_state(following)
@@ -711,11 +713,11 @@ impl MessageEditor {
                 cx.listener(|this, _: &RejectAll, window, cx| this.handle_reject_all(window, cx)),
             )
             .capture_action(cx.listener(Self::paste))
-            .gap_2()
             .p_2()
-            .bg(editor_bg_color)
+            .gap_2()
             .border_t_1()
             .border_color(cx.theme().colors().border)
+            .bg(editor_bg_color)
             .child(
                 h_flex()
                     .justify_between()
@@ -908,6 +910,10 @@ impl MessageEditor {
                                                         .on_click({
                                                             let focus_handle = focus_handle.clone();
                                                             move |_event, window, cx| {
+                                                                telemetry::event!(
+                                                                    "Agent Message Sent",
+                                                                    agent = "zed",
+                                                                );
                                                                 focus_handle.dispatch_action(
                                                                     &Chat, window, cx,
                                                                 );
@@ -1655,9 +1661,34 @@ impl Render for MessageEditor {
 
         let line_height = TextSize::Small.rems(cx).to_pixels(window.rem_size()) * 1.5;
 
+        let in_pro_trial = matches!(
+            self.user_store.read(cx).current_plan(),
+            Some(proto::Plan::ZedProTrial)
+        );
+
+        let pro_user = matches!(
+            self.user_store.read(cx).current_plan(),
+            Some(proto::Plan::ZedPro)
+        );
+
+        let configured_providers: Vec<(IconName, SharedString)> =
+            LanguageModelRegistry::read_global(cx)
+                .providers()
+                .iter()
+                .filter(|provider| {
+                    provider.is_authenticated(cx) && provider.id() != ZED_CLOUD_PROVIDER_ID
+                })
+                .map(|provider| (provider.icon(), provider.name().0.clone()))
+                .collect();
+        let has_existing_providers = configured_providers.len() > 0;
+
         v_flex()
             .size_full()
             .bg(cx.theme().colors().panel_background)
+            .when(
+                has_existing_providers && !in_pro_trial && !pro_user,
+                |this| this.child(cx.new(ApiKeysWithProviders::new)),
+            )
             .when(changed_buffers.len() > 0, |parent| {
                 parent.child(self.render_edits_bar(&changed_buffers, window, cx))
             })

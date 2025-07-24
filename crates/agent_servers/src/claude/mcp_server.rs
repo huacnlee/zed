@@ -19,7 +19,7 @@ use util::debug_panic;
 
 use crate::claude::{
     McpServerConfig,
-    tools::{ClaudeTool, EditToolParams, EditToolResponse, ReadToolParams, ReadToolResponse},
+    tools::{ClaudeTool, EditToolParams, ReadToolParams},
 };
 
 pub struct ClaudeMcpServer {
@@ -69,9 +69,6 @@ impl ClaudeMcpServer {
     }
 
     pub fn server_config(&self) -> Result<McpServerConfig> {
-        #[cfg(not(target_os = "windows"))]
-        let zed_path = util::get_shell_safe_zed_path()?;
-        #[cfg(target_os = "windows")]
         let zed_path = std::env::current_exe()
             .context("finding current executable path for use in mcp_server")?
             .to_string_lossy()
@@ -182,11 +179,9 @@ impl ClaudeMcpServer {
                 let input =
                     serde_json::from_value(request.arguments.context("Arguments required")?)?;
 
-                let result = Self::handle_read_tool_call(input, delegate, cx).await?;
+                let content = Self::handle_read_tool_call(input, delegate, cx).await?;
                 Ok(CallToolResponse {
-                    content: vec![ToolResponseContent::Text {
-                        text: serde_json::to_string(&result)?,
-                    }],
+                    content,
                     is_error: None,
                     meta: None,
                 })
@@ -194,11 +189,9 @@ impl ClaudeMcpServer {
                 let input =
                     serde_json::from_value(request.arguments.context("Arguments required")?)?;
 
-                let result = Self::handle_edit_tool_call(input, delegate, cx).await?;
+                Self::handle_edit_tool_call(input, delegate, cx).await?;
                 Ok(CallToolResponse {
-                    content: vec![ToolResponseContent::Text {
-                        text: serde_json::to_string(&result)?,
-                    }],
+                    content: vec![],
                     is_error: None,
                     meta: None,
                 })
@@ -212,7 +205,7 @@ impl ClaudeMcpServer {
         params: ReadToolParams,
         delegate: AcpClientDelegate,
         cx: &AsyncApp,
-    ) -> Task<Result<ReadToolResponse>> {
+    ) -> Task<Result<Vec<ToolResponseContent>>> {
         cx.foreground_executor().spawn(async move {
             let response = delegate
                 .read_text_file(ReadTextFileParams {
@@ -222,9 +215,9 @@ impl ClaudeMcpServer {
                 })
                 .await?;
 
-            Ok(ReadToolResponse {
-                content: response.content,
-            })
+            Ok(vec![ToolResponseContent::Text {
+                text: response.content,
+            }])
         })
     }
 
@@ -232,7 +225,7 @@ impl ClaudeMcpServer {
         params: EditToolParams,
         delegate: AcpClientDelegate,
         cx: &AsyncApp,
-    ) -> Task<Result<EditToolResponse>> {
+    ) -> Task<Result<()>> {
         cx.foreground_executor().spawn(async move {
             let response = delegate
                 .read_text_file_reusing_snapshot(ReadTextFileParams {
@@ -254,7 +247,7 @@ impl ClaudeMcpServer {
                 })
                 .await?;
 
-            Ok(EditToolResponse)
+            Ok(())
         })
     }
 

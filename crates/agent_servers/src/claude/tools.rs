@@ -434,10 +434,6 @@ pub struct EditToolParams {
     pub new_text: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EditToolResponse;
-
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct ReadToolParams {
     /// The absolute path to the file to read.
@@ -448,12 +444,6 @@ pub struct ReadToolParams {
     /// How many lines to read. Omit for the whole file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadToolResponse {
-    pub content: String,
 }
 
 #[derive(Deserialize, JsonSchema, Debug)]
@@ -614,12 +604,32 @@ pub enum TodoPriority {
     Low,
 }
 
+impl Into<acp::PlanEntryPriority> for TodoPriority {
+    fn into(self) -> acp::PlanEntryPriority {
+        match self {
+            TodoPriority::High => acp::PlanEntryPriority::High,
+            TodoPriority::Medium => acp::PlanEntryPriority::Medium,
+            TodoPriority::Low => acp::PlanEntryPriority::Low,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     Pending,
     InProgress,
     Completed,
+}
+
+impl Into<acp::PlanEntryStatus> for TodoStatus {
+    fn into(self) -> acp::PlanEntryStatus {
+        match self {
+            TodoStatus::Pending => acp::PlanEntryStatus::Pending,
+            TodoStatus::InProgress => acp::PlanEntryStatus::InProgress,
+            TodoStatus::Completed => acp::PlanEntryStatus::Completed,
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
@@ -632,6 +642,16 @@ pub struct Todo {
     pub priority: TodoPriority,
     /// Current status of the todo
     pub status: TodoStatus,
+}
+
+impl Into<acp::PlanEntry> for Todo {
+    fn into(self) -> acp::PlanEntry {
+        acp::PlanEntry {
+            content: self.content,
+            priority: self.priority.into(),
+            status: self.status.into(),
+        }
+    }
 }
 
 #[derive(Deserialize, JsonSchema, Debug)]
