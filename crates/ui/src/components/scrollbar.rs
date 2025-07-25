@@ -254,165 +254,162 @@ impl Element for Scrollbar {
         cx: &mut App,
     ) {
         const EXTRA_PADDING: Pixels = px(5.0);
-        window.with_content_mask(
-            Some(ContentMask {
-                bounds,
-                ..Default::default()
-            }),
-            |window| {
-                let axis = self.kind;
-                let colors = cx.theme().colors();
-                let thumb_state = self.state.thumb_state.get();
-                let thumb_base_color = match thumb_state {
-                    ThumbState::Dragging(_) => colors.scrollbar_thumb_active_background,
-                    ThumbState::Hover => colors.scrollbar_thumb_hover_background,
-                    ThumbState::Inactive => colors.scrollbar_thumb_background,
-                };
+        let content_mask = ContentMask {
+            bounds,
+            ..Default::default()
+        };
+        window.with_content_mask(Some(content_mask), |window| {
+            let axis = self.kind;
+            let colors = cx.theme().colors();
+            let thumb_state = self.state.thumb_state.get();
+            let thumb_base_color = match thumb_state {
+                ThumbState::Dragging(_) => colors.scrollbar_thumb_active_background,
+                ThumbState::Hover => colors.scrollbar_thumb_hover_background,
+                ThumbState::Inactive => colors.scrollbar_thumb_background,
+            };
 
-                let thumb_background = colors.surface_background.blend(thumb_base_color);
+            let thumb_background = colors.surface_background.blend(thumb_base_color);
 
-                let padded_bounds = Bounds::from_corners(
-                    bounds
-                        .origin
-                        .apply_along(axis, |origin| origin + EXTRA_PADDING),
-                    bounds
-                        .bottom_right()
-                        .apply_along(axis, |track_end| track_end - 3.0 * EXTRA_PADDING),
-                );
+            let padded_bounds = Bounds::from_corners(
+                bounds
+                    .origin
+                    .apply_along(axis, |origin| origin + EXTRA_PADDING),
+                bounds
+                    .bottom_right()
+                    .apply_along(axis, |track_end| track_end - 3.0 * EXTRA_PADDING),
+            );
 
-                let thumb_offset = self.thumb.start * padded_bounds.size.along(axis);
-                let thumb_end = self.thumb.end * padded_bounds.size.along(axis);
+            let thumb_offset = self.thumb.start * padded_bounds.size.along(axis);
+            let thumb_end = self.thumb.end * padded_bounds.size.along(axis);
 
-                let thumb_bounds = Bounds::new(
-                    padded_bounds
-                        .origin
-                        .apply_along(axis, |origin| origin + thumb_offset),
-                    padded_bounds
-                        .size
-                        .apply_along(axis, |_| thumb_end - thumb_offset)
-                        .apply_along(axis.invert(), |width| width / 1.5),
-                );
+            let thumb_bounds = Bounds::new(
+                padded_bounds
+                    .origin
+                    .apply_along(axis, |origin| origin + thumb_offset),
+                padded_bounds
+                    .size
+                    .apply_along(axis, |_| thumb_end - thumb_offset)
+                    .apply_along(axis.invert(), |width| width / 1.5),
+            );
 
-                let corners = Corners::all(thumb_bounds.size.along(axis.invert()) / 2.0);
+            let corners = Corners::all(thumb_bounds.size.along(axis.invert()) / 2.0);
 
-                window.paint_quad(quad(
-                    thumb_bounds,
-                    corners,
-                    thumb_background,
-                    Edges::default(),
-                    Hsla::transparent_black(),
-                    BorderStyle::default(),
-                ));
+            window.paint_quad(quad(
+                thumb_bounds,
+                corners,
+                thumb_background,
+                Edges::default(),
+                Hsla::transparent_black(),
+                BorderStyle::default(),
+            ));
 
-                if thumb_state.is_dragging() {
-                    window.set_window_cursor_style(CursorStyle::Arrow);
-                } else {
-                    window.set_cursor_style(CursorStyle::Arrow, hitbox);
-                }
+            if thumb_state.is_dragging() {
+                window.set_window_cursor_style(CursorStyle::Arrow);
+            } else {
+                window.set_cursor_style(CursorStyle::Arrow, hitbox);
+            }
 
-                let scroll = self.state.scroll_handle.clone();
+            let scroll = self.state.scroll_handle.clone();
 
-                enum ScrollbarMouseEvent {
-                    GutterClick,
-                    ThumbDrag(Pixels),
-                }
+            enum ScrollbarMouseEvent {
+                GutterClick,
+                ThumbDrag(Pixels),
+            }
 
-                let compute_click_offset =
-                    move |event_position: Point<Pixels>,
-                          max_offset: Size<Pixels>,
-                          event_type: ScrollbarMouseEvent| {
-                        let viewport_size = padded_bounds.size.along(axis);
+            let compute_click_offset =
+                move |event_position: Point<Pixels>,
+                      max_offset: Size<Pixels>,
+                      event_type: ScrollbarMouseEvent| {
+                    let viewport_size = padded_bounds.size.along(axis);
 
-                        let thumb_size = thumb_bounds.size.along(axis);
+                    let thumb_size = thumb_bounds.size.along(axis);
 
-                        let thumb_offset = match event_type {
-                            ScrollbarMouseEvent::GutterClick => thumb_size / 2.,
-                            ScrollbarMouseEvent::ThumbDrag(thumb_offset) => thumb_offset,
-                        };
-
-                        let thumb_start = (event_position.along(axis)
-                            - padded_bounds.origin.along(axis)
-                            - thumb_offset)
-                            .clamp(px(0.), viewport_size - thumb_size);
-
-                        let max_offset = max_offset.along(axis);
-                        let percentage = if viewport_size > thumb_size {
-                            thumb_start / (viewport_size - thumb_size)
-                        } else {
-                            0.
-                        };
-
-                        -max_offset * percentage
+                    let thumb_offset = match event_type {
+                        ScrollbarMouseEvent::GutterClick => thumb_size / 2.,
+                        ScrollbarMouseEvent::ThumbDrag(thumb_offset) => thumb_offset,
                     };
 
-                window.on_mouse_event({
-                    let scroll = scroll.clone();
-                    let state = self.state.clone();
-                    move |event: &MouseDownEvent, phase, _, _| {
-                        if !(phase.bubble() && bounds.contains(&event.position)) {
-                            return;
-                        }
+                    let thumb_start = (event_position.along(axis)
+                        - padded_bounds.origin.along(axis)
+                        - thumb_offset)
+                        .clamp(px(0.), viewport_size - thumb_size);
 
-                        if thumb_bounds.contains(&event.position) {
-                            let offset =
-                                event.position.along(axis) - thumb_bounds.origin.along(axis);
-                            state.set_dragging(offset);
-                        } else {
-                            let click_offset = compute_click_offset(
-                                event.position,
-                                scroll.max_offset(),
-                                ScrollbarMouseEvent::GutterClick,
-                            );
-                            scroll.set_offset(scroll.offset().apply_along(axis, |_| click_offset));
-                        }
-                    }
-                });
+                    let max_offset = max_offset.along(axis);
+                    let percentage = if viewport_size > thumb_size {
+                        thumb_start / (viewport_size - thumb_size)
+                    } else {
+                        0.
+                    };
 
-                window.on_mouse_event({
-                    let scroll = scroll.clone();
-                    move |event: &ScrollWheelEvent, phase, window, _| {
-                        if phase.bubble() && bounds.contains(&event.position) {
-                            let current_offset = scroll.offset();
-                            scroll.set_offset(
-                                current_offset + event.delta.pixel_delta(window.line_height()),
-                            );
-                        }
-                    }
-                });
+                    -max_offset * percentage
+                };
 
+            window.on_mouse_event({
+                let scroll = scroll.clone();
                 let state = self.state.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
-                    match state.thumb_state.get() {
-                        ThumbState::Dragging(drag_state) if event.dragging() => {
-                            let drag_offset = compute_click_offset(
-                                event.position,
-                                scroll.max_offset(),
-                                ScrollbarMouseEvent::ThumbDrag(drag_state),
-                            );
-                            scroll.set_offset(scroll.offset().apply_along(axis, |_| drag_offset));
-                            window.refresh();
-                            if let Some(id) = state.parent_id {
-                                cx.notify(id);
-                            }
-                        }
-                        _ => state.set_thumb_hovered(thumb_bounds.contains(&event.position)),
+                move |event: &MouseDownEvent, phase, _, _| {
+                    if !(phase.bubble() && bounds.contains(&event.position)) {
+                        return;
                     }
-                });
-                let state = self.state.clone();
-                let scroll = self.state.scroll_handle.clone();
-                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                    if phase.bubble() {
-                        if state.is_dragging() {
-                            state.set_thumb_hovered(thumb_bounds.contains(&event.position));
-                        }
-                        scroll.drag_ended();
+
+                    if thumb_bounds.contains(&event.position) {
+                        let offset = event.position.along(axis) - thumb_bounds.origin.along(axis);
+                        state.set_dragging(offset);
+                    } else {
+                        let click_offset = compute_click_offset(
+                            event.position,
+                            scroll.max_offset(),
+                            ScrollbarMouseEvent::GutterClick,
+                        );
+                        scroll.set_offset(scroll.offset().apply_along(axis, |_| click_offset));
+                    }
+                }
+            });
+
+            window.on_mouse_event({
+                let scroll = scroll.clone();
+                move |event: &ScrollWheelEvent, phase, window, _| {
+                    if phase.bubble() && bounds.contains(&event.position) {
+                        let current_offset = scroll.offset();
+                        scroll.set_offset(
+                            current_offset + event.delta.pixel_delta(window.line_height()),
+                        );
+                    }
+                }
+            });
+
+            let state = self.state.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
+                match state.thumb_state.get() {
+                    ThumbState::Dragging(drag_state) if event.dragging() => {
+                        let drag_offset = compute_click_offset(
+                            event.position,
+                            scroll.max_offset(),
+                            ScrollbarMouseEvent::ThumbDrag(drag_state),
+                        );
+                        scroll.set_offset(scroll.offset().apply_along(axis, |_| drag_offset));
+                        window.refresh();
                         if let Some(id) = state.parent_id {
                             cx.notify(id);
                         }
                     }
-                });
-            },
-        )
+                    _ => state.set_thumb_hovered(thumb_bounds.contains(&event.position)),
+                }
+            });
+            let state = self.state.clone();
+            let scroll = self.state.scroll_handle.clone();
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                if phase.bubble() {
+                    if state.is_dragging() {
+                        state.set_thumb_hovered(thumb_bounds.contains(&event.position));
+                    }
+                    scroll.drag_ended();
+                    if let Some(id) = state.parent_id {
+                        cx.notify(id);
+                    }
+                }
+            });
+        })
     }
 }
 
