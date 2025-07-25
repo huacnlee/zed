@@ -519,6 +519,7 @@ impl MetalRenderer {
                     st_position: vertex.st_position,
                     content_mask: ContentMask {
                         bounds: tile.bounds.map(Into::into),
+                        ..Default::default()
                     },
                 }));
             tiles.insert(path.id, tile);

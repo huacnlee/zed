@@ -515,6 +515,7 @@ impl BladeRenderer {
                     st_position: vertex.st_position,
                     content_mask: ContentMask {
                         bounds: tile.bounds.map(Into::into),
+                        ..Default::default()
                     },
                 }));
             self.path_tiles.insert(path.id, tile);
