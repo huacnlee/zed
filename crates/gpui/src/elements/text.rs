@@ -560,6 +560,16 @@ impl TextLayout {
         None
     }
 
+    /// The lines of this layout.
+    pub fn lines(&self) -> &SmallVec<[WrappedLine; 1]> {
+        self.0.borrow().as_ref().unwrap().lines.as_ref()
+    }
+
+    /// The wrap width for this layout, if any.
+    pub fn wrap_width(&self) -> Option<Pixels> {
+        self.0.borrow().as_ref().unwrap().wrap_width
+    }
+
     /// The bounds of this layout.
     pub fn bounds(&self) -> Bounds<Pixels> {
         self.0.borrow().as_ref().unwrap().bounds.unwrap()
