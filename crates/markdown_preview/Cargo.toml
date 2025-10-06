@@ -37,3 +37,8 @@ workspace.workspace = true
 
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }
+languages = { workspace = true, features = ["load-grammars"] }
+node_runtime.workspace = true
+rust-embed.workspace = true
+smol.workspace = true
+tree-sitter-rust.workspace = true
