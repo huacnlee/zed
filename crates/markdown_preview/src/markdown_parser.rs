@@ -61,14 +61,14 @@ struct MarkdownParser<'a> {
 
 struct MarkdownListItem {
     content: Vec<ParsedMarkdownElement>,
-    item_type: ParsedMarkdownListItemType,
+    item_type: ListItemType,
 }
 
 impl Default for MarkdownListItem {
     fn default() -> Self {
         Self {
             content: Vec::new(),
-            item_type: ParsedMarkdownListItemType::Unordered,
+            item_type: ListItemType::Bulleted,
         }
     }
 }
@@ -594,11 +594,11 @@ impl<'a> MarkdownParser<'a> {
                             let block = ParsedMarkdownElement::Paragraph(text);
                             if let Some(content) = items_stack.last_mut() {
                                 let item_type = if let Some((checked, range)) = task_list {
-                                    ParsedMarkdownListItemType::Task(checked, range)
+                                    ListItemType::Task(checked, range)
                                 } else if let Some(order) = order {
-                                    ParsedMarkdownListItemType::Ordered(order)
+                                    ListItemType::Ordered(order)
                                 } else {
-                                    ParsedMarkdownListItemType::Unordered
+                                    ListItemType::Bulleted
                                 };
                                 content.item_type = item_type;
                                 content.content.push(block);
@@ -1072,7 +1072,7 @@ impl<'a> MarkdownParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ParsedMarkdownListItemType::*;
+    use ListItemType::*;
     use core::panic;
     use gpui::{AbsoluteLength, BackgroundExecutor, DefiniteLength};
     use language::{
@@ -1896,7 +1896,7 @@ Some other content
             vec![list_item(
                 0..67,
                 1,
-                Unordered,
+                Bulleted,
                 vec![p("This is a list item with an inline HTML tag.", 4..44),],
             ),],
         );
@@ -2153,7 +2153,7 @@ fn main() {
     fn list_item(
         source_range: Range<usize>,
         depth: u16,
-        item_type: ParsedMarkdownListItemType,
+        item_type: ListItemType,
         content: Vec<ParsedMarkdownElement>,
     ) -> ParsedMarkdownElement {
         ParsedMarkdownElement::ListItem(ParsedMarkdownListItem {

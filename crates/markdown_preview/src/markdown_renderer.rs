@@ -1,7 +1,7 @@
 use crate::markdown_elements::{
-    HeadingLevel, Image, Link, MarkdownParagraph, MarkdownParagraphChunk, ParsedMarkdown,
-    ParsedMarkdownBlockQuote, ParsedMarkdownCodeBlock, ParsedMarkdownElement,
-    ParsedMarkdownHeading, ParsedMarkdownListItem, ParsedMarkdownListItemType, ParsedMarkdownTable,
+    HeadingLevel, Image, Link, ListItemType, MarkdownParagraph, MarkdownParagraphChunk,
+    ParsedMarkdown, ParsedMarkdownBlockQuote, ParsedMarkdownCodeBlock, ParsedMarkdownElement,
+    ParsedMarkdownHeading, ParsedMarkdownListItem, ParsedMarkdownTable,
     ParsedMarkdownTableAlignment, ParsedMarkdownTableRow,
 };
 use fs::normalize_path;
@@ -215,13 +215,13 @@ fn render_markdown_list_item(
     parsed: &ParsedMarkdownListItem,
     cx: &mut RenderContext,
 ) -> AnyElement {
-    use ParsedMarkdownListItemType::*;
+    use ListItemType::::*;
 
     let padding = cx.scaled_rems((parsed.depth - 1) as f32);
 
     let bullet = match &parsed.item_type {
         Ordered(order) => format!("{}.", order).into_any_element(),
-        Unordered => "•".into_any_element(),
+        Bulleted => "•".into_any_element(),
         Task(checked, range) => div()
             .id(cx.next_id(range))
             .mt(cx.scaled_rems(3.0 / 16.0))

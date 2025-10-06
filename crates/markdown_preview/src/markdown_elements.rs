@@ -62,16 +62,17 @@ pub struct ParsedMarkdownListItem {
     pub source_range: Range<usize>,
     /// How many indentations deep this item is.
     pub depth: u16,
-    pub item_type: ParsedMarkdownListItemType,
+    pub item_type: ListItemType,
     pub content: Vec<ParsedMarkdownElement>,
 }
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
-pub enum ParsedMarkdownListItemType {
+pub(crate) enum ListItemType {
+    /// An ordered list item, value is 1-based index.
     Ordered(u64),
+    Bulleted,
     Task(bool, Range<usize>),
-    Unordered,
 }
 
 #[derive(Debug)]
