@@ -136,24 +136,16 @@ impl LineWrapper {
         truncation_suffix: &str,
         runs: &'a [TextRun],
     ) -> (SharedString, Cow<'a, [TextRun]>) {
-        let mut width = px(0.);
-        let mut suffix_width = truncation_suffix
+        let mut width = truncation_suffix
             .chars()
             .map(|c| self.width_for_char(c))
             .fold(px(0.0), |a, x| a + x);
         let mut char_indices = line.char_indices();
-        let mut truncate_ix = 0;
         for (ix, c) in char_indices {
-            if width + suffix_width < truncate_width {
-                truncate_ix = ix;
-            }
+            width += self.width_for_char(c);
 
-            let char_width = self.width_for_char(c);
-            width += char_width;
-
-            if width.floor() > truncate_width {
-                let result =
-                    SharedString::from(format!("{}{}", &line[..truncate_ix], truncation_suffix));
+            if width.ceil() >= truncate_width {
+                let result = SharedString::from(format!("{}{}", &line[..ix], truncation_suffix));
                 let mut runs = runs.to_vec();
                 update_runs_after_truncation(&result, truncation_suffix, &mut runs);
 
