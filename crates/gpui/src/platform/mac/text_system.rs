@@ -349,7 +349,7 @@ impl MacTextSystemState {
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let font = &self.fonts[params.font_id.0];
         let scale = Transform2F::from_scale(params.scale_factor);
-        Ok(font
+        let mut bounds: Bounds<DevicePixels> = font
             .raster_bounds(
                 params.glyph_id.0,
                 params.font_size.into(),
@@ -357,7 +357,22 @@ impl MacTextSystemState {
                 HintingOptions::None,
                 font_kit::canvas::RasterizationOptions::GrayscaleAa,
             )?
-            .into())
+            .into();
+
+        // Add padding to prevent glyph clipping, especially for numbers and characters
+        // with descenders or tall ascenders. This ensures the full glyph is rendered.
+        // Use a percentage-based padding that scales with font size (8% of font size).
+        let padding_ratio = 0.08; // 8% of font size
+        let padding_pixels =
+            (params.font_size.0 * params.scale_factor * padding_ratio).ceil() as i32;
+        let padding = DevicePixels(padding_pixels.max(2)); // Minimum 2 pixels
+
+        bounds.origin.x -= padding;
+        bounds.origin.y -= padding;
+        bounds.size.width += DevicePixels(padding.0 * 2);
+        bounds.size.height += DevicePixels(padding.0 * 2);
+
+        Ok(bounds)
     }
 
     fn rasterize_glyph(
@@ -370,10 +385,13 @@ impl MacTextSystemState {
         } else {
             // Add an extra pixel when the subpixel variant isn't zero to make room for anti-aliasing.
             let mut bitmap_size = glyph_bounds.size;
-            if params.subpixel_variant.x > 0 {
+            let mut subpixel_variant = params.subpixel_variant;
+            if subpixel_variant.x > 0 {
+                subpixel_variant.x += 1;
                 bitmap_size.width += DevicePixels(1);
             }
-            if params.subpixel_variant.y > 0 {
+            if subpixel_variant.y > 0 {
+                subpixel_variant.y += 1;
                 bitmap_size.height += DevicePixels(1);
             }
             let bitmap_size = bitmap_size;
@@ -415,9 +433,7 @@ impl MacTextSystemState {
                 params.scale_factor as CGFloat,
             );
 
-            let subpixel_shift = params
-                .subpixel_variant
-                .map(|v| v as f32 / SUBPIXEL_VARIANTS_X as f32);
+            let subpixel_shift = subpixel_variant.map(|v| v as f32 / SUBPIXEL_VARIANTS_X as f32);
             cx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
             cx.set_gray_fill_color(0.0, 1.0);
             cx.set_allows_antialiasing(true);
