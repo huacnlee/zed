@@ -638,6 +638,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn background_appearance(&self) -> WindowBackgroundAppearance;
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
+    /// Overrides the window's appearance (light/dark) independent of the OS-wide
+    /// setting, or returns it to following the system with [`AppearanceMode::Auto`].
+    ///
+    /// Currently only implemented on macOS, where it sets `NSWindow.appearance` so the
+    /// native window chrome (the 1px window border and titlebar) matches a dark app
+    /// theme even when the system is in light mode (or vice versa). A no-op on other
+    /// platforms.
+    fn set_appearance(&self, _mode: AppearanceMode) {}
     fn minimize(&self);
     fn zoom(&self);
     fn toggle_fullscreen(&self);
@@ -1685,6 +1693,32 @@ pub enum WindowAppearance {
     ///
     /// On macOS, this corresponds to the `NSAppearanceNameVibrantDark` appearance.
     VibrantDark,
+}
+
+/// How a window's native chrome (the window border and titlebar) should pick its
+/// light/dark appearance. Passed to [`PlatformWindow::set_appearance`].
+///
+/// This is the input to the appearance *override* and is distinct from
+/// [`WindowAppearance`], which reports the concrete appearance currently in effect.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppearanceMode {
+    /// Follow the OS-wide appearance setting. This clears any override that was set
+    /// previously, so the window chrome tracks the system light/dark setting again.
+    ///
+    /// On macOS, this sets `NSWindow.appearance` to `nil`.
+    #[default]
+    Auto,
+
+    /// Force a light appearance regardless of the system setting.
+    ///
+    /// On macOS, this corresponds to the `aqua` appearance.
+    Light,
+
+    /// Force a dark appearance regardless of the system setting.
+    ///
+    /// On macOS, this corresponds to the `darkAqua` appearance.
+    Dark,
 }
 
 /// The appearance of the background of the window itself, when there is

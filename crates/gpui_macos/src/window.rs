@@ -25,7 +25,8 @@ use cocoa::{
 };
 use dispatch2::DispatchQueue;
 use gpui::{
-    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalPaths,
+    AnyWindowHandle, AppearanceMode, BackgroundExecutor, Bounds, Capslock, CursorStyle,
+    ExternalPaths,
     FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas,
     PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
@@ -1459,6 +1460,24 @@ impl PlatformWindow for MacWindow {
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
         self.0.as_ref().lock().background_appearance
+    }
+
+    fn set_appearance(&self, mode: AppearanceMode) {
+        let native_window = self.0.lock().native_window;
+        unsafe {
+            // `Auto` clears the override by setting a nil appearance, so the window
+            // falls back to tracking the system-wide light/dark setting.
+            let ns_appearance: id = match mode {
+                AppearanceMode::Auto => nil,
+                AppearanceMode::Light => {
+                    msg_send![class!(NSAppearance), appearanceNamed: crate::window_appearance::NSAppearanceNameAqua]
+                }
+                AppearanceMode::Dark => {
+                    msg_send![class!(NSAppearance), appearanceNamed: crate::window_appearance::NSAppearanceNameDarkAqua]
+                }
+            };
+            let _: () = msg_send![native_window, setAppearance: ns_appearance];
+        }
     }
 
     fn is_subpixel_rendering_supported(&self) -> bool {

@@ -1,8 +1,9 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
+    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, AppearanceMode,
+    Arena, Asset, AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
+    Capslock,
     Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
@@ -2326,6 +2327,20 @@ impl Window {
     pub fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         self.platform_window
             .set_background_appearance(background_appearance);
+    }
+
+    /// Overrides the window's appearance (light/dark) independent of the OS-wide
+    /// setting, or returns it to following the system with [`AppearanceMode::Auto`].
+    ///
+    /// On macOS this sets the underlying `NSWindow.appearance`, which controls the
+    /// native window chrome such as the 1px window border and the titlebar. Call this
+    /// when the app uses a dark theme while the system is in light mode (or vice
+    /// versa) so the window edges render to match the theme. Note that while an
+    /// appearance is forced, the window stops tracking system light/dark changes;
+    /// pass [`AppearanceMode::Auto`] to resume following the system. On other
+    /// platforms this is a no-op.
+    pub fn set_appearance(&self, mode: AppearanceMode) {
+        self.platform_window.set_appearance(mode);
     }
 
     /// Mark the window as dirty at the platform level.
