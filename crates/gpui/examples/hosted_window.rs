@@ -1,19 +1,22 @@
-//! Embeds GPUI windows inside an application built with the platform's native
-//! APIs, using `WindowOptions::host_window_handle` — the building block for
-//! adopting GPUI incrementally inside an existing native application.
+//! Native macOS window tabs hosting GPU-rendered GPUI surfaces, built on
+//! `WindowOptions::host_window_handle` — the building block for adopting GPUI
+//! incrementally inside an existing native application.
 //!
-//! The scenario: a mail-style AppKit application, demonstrating every way the
-//! two UI stacks compose:
+//! The contrast is the point: the windows, the system tab bar (the same
+//! native tabs Terminal, Safari, or Ghostty use), and the search field are
+//! plain AppKit — while everything inside each tab is a hosted GPUI window
+//! animating at the display's refresh rate: gradient-lit metric cards, a live
+//! equalizer chart, layered showcase tiles. Content AppKit views don't draw,
+//! inside windows AppKit owns.
 //!
-//! - The window shell, vibrant sidebar, search field, and navigation are
-//!   plain AppKit; the message pane is a hosted GPUI window.
-//! - A second, component-sized GPUI window (the account card) is hosted
-//!   inside the native sidebar.
-//! - "More ▾" opens a system `NSPopover` (arrow, vibrancy, transient
-//!   dismissal) whose content is a third hosted GPUI window — with working
-//!   GPUI keyboard shortcuts.
-//! - Native controls layer *above* GPUI (the Address field), and their input
-//!   streams into GPUI state (the banner mirrors search & address live).
+//! Every seam between the two worlds is wired up:
+//!
+//! - Two native windows are merged into one tab group — switch tabs natively,
+//!   or with ⌘1/⌘2: GPUI key bindings that select the *native* tab.
+//! - The native search field's text streams into GPUI live, filtering the
+//!   metric cards.
+//! - "Details ▾" opens a system `NSPopover` (arrow, vibrancy, transient
+//!   dismissal) hosting another GPUI window — with a working ⏎ key binding.
 //!
 //! Run with: `cargo run -p gpui --example hosted_window` (macOS today;
 //! Windows/X11 hosts work the same way through `host_window_handle`).
@@ -23,18 +26,17 @@
 #[cfg(target_os = "macos")]
 mod example {
     use gpui::{
-        App, Bounds, Context, FocusHandle, FontWeight, KeyBinding, Pixels, SharedString, Window,
-        WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, canvas, div, point,
-        prelude::*, px, rgb, rgba, size,
+        Animation, AnimationExt as _, App, Bounds, Context, FocusHandle, FontWeight, KeyBinding,
+        Pixels, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, canvas,
+        div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba, size,
     };
     use gpui_platform::application;
     use objc2::rc::Retained;
     use objc2::runtime::NSObject;
     use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
     use objc2_app_kit::{
-        NSAutoresizingMaskOptions, NSBackingStoreType, NSControl, NSPopover, NSPopoverBehavior,
-        NSSearchField, NSTextField, NSView, NSViewController, NSVisualEffectBlendingMode,
-        NSVisualEffectMaterial, NSVisualEffectView, NSWindow, NSWindowStyleMask,
+        NSBackingStoreType, NSControl, NSPopover, NSPopoverBehavior, NSSearchField, NSView,
+        NSViewController, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
     };
     use objc2_foundation::{NSNotification, NSPoint, NSRect, NSRectEdge, NSSize, NSString};
     use raw_window_handle::{AppKitWindowHandle, HasWindowHandle, RawWindowHandle};
@@ -44,11 +46,19 @@ mod example {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    actions!(hosted_window, [NewDocument, OpenRecent, Share]);
+    actions!(hosted_window, [SelectTab1, SelectTab2, DismissInfo]);
 
-    const KEY_CONTEXT: &str = "QuickActions";
+    const APP_CONTEXT: &str = "HostedDemo";
+    const POPOVER_CONTEXT: &str = "InfoPopover";
 
-    /// Ivars for [`SearchHandler`]: forwards the native search field's text.
+    const WIDTH: f64 = 760.;
+    const HEIGHT: f64 = 520.;
+
+    // ------------------------------------------------------------------------
+    // AppKit glue: the search-field delegate.
+    // ------------------------------------------------------------------------
+
+    /// Ivars for [`SearchHandler`]: forwards the native field's text.
     struct SearchHandlerIvars {
         tx: mpsc::Sender<String>,
     }
@@ -84,109 +94,18 @@ mod example {
         }
     }
 
-    const WIDTH: f64 = 760.;
-    const HEIGHT: f64 = 480.;
-    const SIDEBAR: f64 = 200.;
+    // ------------------------------------------------------------------------
+    // GPUI: the info popover content.
+    // ------------------------------------------------------------------------
 
-    /// A small account card embedded at the bottom of the *native* sidebar —
-    /// a second hosted GPUI window, showing that GPUI embeds at any
-    /// granularity: a whole pane or a single component.
-    struct AccountCard;
-
-    impl Render for AccountCard {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .size_full()
-                .p_2()
-                .rounded_lg()
-                .bg(rgba(0x7878801a))
-                .text_color(rgba(0x000000d9))
-                .child(
-                    div()
-                        .size(px(28.))
-                        .rounded_full()
-                        .bg(rgb(0x10b981))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(gpui::white())
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("JL"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Jason — GPUI card"),
-                        )
-                        .child(
-                            div()
-                                .h(px(4.))
-                                .w_full()
-                                .mt_1()
-                                .rounded_full()
-                                .bg(rgba(0x3c3c4326))
-                                .child(div().h_full().w_2_3().rounded_full().bg(rgb(0x10b981))),
-                        ),
-                )
-        }
-    }
-
-    /// Quick-actions panel rendered inside a native `NSPopover` — a third
-    /// hosted GPUI window, in a *system-owned* container this time (arrow,
-    /// vibrancy, transient dismissal). The shortcuts are real GPUI key
-    /// bindings, exercising hosted keyboard input.
-    struct QuickActions {
+    /// Info panel hosted inside a native `NSPopover`. ⏎ is a real GPUI key
+    /// binding — hosted windows receive keyboard input.
+    struct InfoPopover {
         focus_handle: FocusHandle,
-        last_action: Option<&'static str>,
+        acknowledged: bool,
     }
 
-    impl QuickActions {
-        fn trigger(&mut self, label: &'static str, cx: &mut Context<Self>) {
-            self.last_action = Some(label);
-            cx.notify();
-        }
-
-        fn row(
-            &self,
-            id: &'static str,
-            swatch: u32,
-            label: &'static str,
-            shortcut: &'static str,
-            cx: &mut Context<Self>,
-        ) -> impl IntoElement {
-            div()
-                .id(SharedString::new_static(id))
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .h(px(28.))
-                .rounded_md()
-                .hover(|style| style.bg(rgba(0x3b82f626)))
-                .active(|style| style.bg(rgba(0x3b82f640)))
-                .child(div().size(px(14.)).rounded_sm().bg(rgb(swatch)))
-                .child(div().flex_1().text_size(px(13.)).child(label))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgba(0x3c3c4366))
-                        .child(shortcut),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.trigger(label, cx)))
-        }
-    }
-
-    impl Render for QuickActions {
+    impl Render for InfoPopover {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .flex()
@@ -195,44 +114,49 @@ mod example {
                 .p_3()
                 .size_full()
                 .text_color(rgba(0x000000d9))
-                .key_context(KEY_CONTEXT)
+                .key_context(POPOVER_CONTEXT)
                 .track_focus(&self.focus_handle)
-                .on_action(cx.listener(|this, _: &NewDocument, _, cx| {
-                    this.trigger("New Document", cx)
+                .on_action(cx.listener(|this, _: &DismissInfo, _, cx| {
+                    this.acknowledged = true;
+                    cx.notify();
                 }))
-                .on_action(
-                    cx.listener(|this, _: &OpenRecent, _, cx| this.trigger("Open Recent", cx)),
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("This panel is GPUI too"),
                 )
-                .on_action(cx.listener(|this, _: &Share, _, cx| this.trigger("Share…", cx)))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgba(0x3c3c4380))
+                        .child(
+                            "A GPUI window hosted inside a system NSPopover — arrow, vibrancy \
+                             and transient dismissal are AppKit; the content is GPUI. Press ⏎.",
+                        ),
+                )
+                .child(div().flex_1())
                 .child(
                     div()
                         .flex()
-                        .flex_col()
-                        .child(self.row("new", 0x3b82f6, "New Document", "⌘N", cx))
-                        .child(self.row("open", 0x22c55e, "Open Recent", "⌘O", cx))
-                        .child(self.row("share", 0xf59e0b, "Share…", "⇧⌘S", cx)),
-                )
-                .child(div().h(px(1.)).w_full().bg(rgba(0x3c3c431f)))
-                .child(
-                    div()
-                        .px_2()
-                        .text_size(px(11.))
-                        .text_color(rgba(0x3c3c4380))
-                        .child(match self.last_action {
-                            Some(label) => format!("Last action: {label}"),
-                            None => "Click a row or press a shortcut".to_string(),
+                        .justify_end()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(if self.acknowledged {
+                            "⏎ received by GPUI ✓"
+                        } else {
+                            "waiting for ⏎ …"
                         }),
                 )
         }
     }
 
-    /// Shows an `NSPopover` anchored to `anchor` (bounds within the message
-    /// pane's GPUI window) and hosts a [`QuickActions`] GPUI window inside it.
-    fn open_quick_actions(anchor: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    /// Shows an `NSPopover` anchored to `anchor` (bounds within the hosting
+    /// GPUI window) and hosts an [`InfoPopover`] GPUI window inside it.
+    fn open_info_popover(anchor: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        // Anchor to the message pane's own (hosted) GPUI view.
         let Ok(handle) = HasWindowHandle::window_handle(window) else {
             return;
         };
@@ -243,7 +167,7 @@ mod example {
         // only used synchronously while the window is alive.
         let parent_view: &NSView = unsafe { &*parent.ns_view.as_ptr().cast() };
 
-        let content_size = size(px(280.), px(164.));
+        let content_size = size(px(280.), px(124.));
 
         // SAFETY: main thread; the popover objects are kept alive by the
         // dismissal task below.
@@ -294,9 +218,9 @@ mod example {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let content = cx.new(|cx| QuickActions {
+                    let content = cx.new(|cx| InfoPopover {
                         focus_handle: cx.focus_handle(),
-                        last_action: None,
+                        acknowledged: false,
                     });
                     let focus_handle = content.read(cx).focus_handle.clone();
                     window.focus(&focus_handle, cx);
@@ -305,8 +229,7 @@ mod example {
             )
             .expect("failed to open hosted popover window");
 
-        // Let the popover receive keyboard input immediately, so the shortcuts
-        // work without clicking inside first.
+        // Let the popover receive keyboard input immediately.
         // SAFETY: main thread; the container was installed by `show...` above.
         unsafe {
             if let Some(popover_window) = container.window() {
@@ -314,9 +237,9 @@ mod example {
             }
         }
 
-        // When the popover is dismissed (e.g. by clicking outside), close the
-        // hosted GPUI window. Production code would use an `NSPopoverDelegate`;
-        // polling keeps this example small.
+        // When the popover is dismissed, close the hosted GPUI window.
+        // Production code would use an `NSPopoverDelegate`; polling keeps this
+        // example small.
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
@@ -336,77 +259,218 @@ mod example {
         .detach();
     }
 
-    /// The content pane — a mail message view, rendered entirely by GPUI. Its
-    /// `query` mirrors the native sidebar's NSSearchField in real time.
-    struct MessagePane {
-        replied: bool,
-        query: String,
-        address: String,
-        /// The "More" button's bounds, captured at layout so the native popover
-        /// can anchor to it.
-        more_bounds: Rc<Cell<Bounds<Pixels>>>,
+    // ------------------------------------------------------------------------
+    // GPUI: the GPU-rendered tab contents.
+    // ------------------------------------------------------------------------
+
+    struct Metric {
+        label: &'static str,
+        value: &'static str,
+        accent: u32,
     }
 
-    /// A small pill mirroring a native field's value.
-    fn mirror_chip(value: &str, empty_hint: &str) -> impl IntoElement {
-        let empty = value.is_empty();
+    // The shadcn default chart palette.
+    const CHART_1: u32 = 0xe76e50;
+    const CHART_2: u32 = 0x2a9d90;
+    const CHART_4: u32 = 0xe8c468;
+
+    const METRICS: [Metric; 3] = [
+        Metric {
+            label: "Frame time",
+            value: "8.3 ms",
+            accent: CHART_2,
+        },
+        Metric {
+            label: "Draw calls",
+            value: "1,284",
+            accent: CHART_1,
+        },
+        Metric {
+            label: "Layers",
+            value: "96",
+            accent: CHART_4,
+        },
+    ];
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Pane {
+        Dashboard,
+        Showcase,
+    }
+
+    struct DemoApp {
+        focus_handle: FocusHandle,
+        pane: Pane,
+        /// Mirrors the native NSSearchField in real time; filters the cards.
+        query: String,
+        /// Both native windows of the tab group, for ⌘1/⌘2 (GPUI key bindings
+        /// selecting the *native* tab).
+        tab_windows: (usize, usize),
+        info_anchor: Rc<Cell<Bounds<Pixels>>>,
+    }
+
+    /// shadcn-style box shadows — much subtler than the tailwind presets.
+    trait ShadcnShadow: Styled + Sized {
+        /// `shadow-xs`: 0 1px 2px rgb(0 0 0 / 0.05)
+        fn shadow_card(mut self) -> Self {
+            self.style().box_shadow = Some(vec![gpui::BoxShadow {
+                color: gpui::hsla(0., 0., 0., 0.05),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(2.),
+                spread_radius: px(0.),
+                inset: false,
+            }]);
+            self
+        }
+
+        /// `shadow-md`: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)
+        fn shadow_card_hover(mut self) -> Self {
+            self.style().box_shadow = Some(vec![
+                gpui::BoxShadow {
+                    color: gpui::hsla(0., 0., 0., 0.1),
+                    offset: point(px(0.), px(4.)),
+                    blur_radius: px(6.),
+                    spread_radius: px(-1.),
+                    inset: false,
+                },
+                gpui::BoxShadow {
+                    color: gpui::hsla(0., 0., 0., 0.1),
+                    offset: point(px(0.), px(2.)),
+                    blur_radius: px(4.),
+                    spread_radius: px(-2.),
+                    inset: false,
+                },
+            ]);
+            self
+        }
+    }
+
+    impl<T: Styled> ShadcnShadow for T {}
+
+    /// A small outline badge (shadcn-style) labelling which UI stack draws a
+    /// region, with a colored dot.
+    fn stack_badge(color: u32, label: &'static str) -> impl IntoElement {
         div()
+            .flex()
+            .items_center()
+            .gap_1p5()
             .px_2()
             .py_0p5()
-            .rounded_full()
-            .bg(if empty {
-                rgba(0x7878801f)
-            } else {
-                rgba(0x3b82f626)
-            })
-            .text_color(if empty {
-                rgba(0x3c3c4366)
-            } else {
-                rgba(0x1d4ed8ff)
-            })
-            .child(if empty {
-                empty_hint.to_string()
-            } else {
-                value.to_string()
-            })
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0xe4e4e7))
+            .bg(gpui::white())
+            .text_size(px(11.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(0x71717a))
+            .child(div().size(px(6.)).rounded_full().bg(rgb(color)))
+            .child(label)
     }
 
-    impl Render for MessagePane {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    impl DemoApp {
+        /// Select a native window tab from a GPUI key binding (GPUI → AppKit
+        /// control).
+        fn select_tab(&mut self, index: usize, _cx: &mut Context<Self>) {
+            let window = if index == 0 {
+                self.tab_windows.0
+            } else {
+                self.tab_windows.1
+            } as *const NSWindow;
+            if !window.is_null() {
+                // SAFETY: main thread; both windows outlive the process (they
+                // are forgotten in `run`).
+                unsafe {
+                    (*window).makeKeyAndOrderFront(None);
+                }
+            }
+        }
+
+        fn metric_card(&self, metric: &Metric) -> impl IntoElement {
+            let dimmed = !self.query.is_empty()
+                && !metric
+                    .label
+                    .to_lowercase()
+                    .contains(&self.query.to_lowercase());
             div()
+                .flex_1()
+                .h(px(92.))
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(0xe4e4e7))
+                .bg(gpui::white())
+                .p_4()
                 .flex()
                 .flex_col()
-                .size_full()
-                .bg(gpui::white())
-                .text_color(rgba(0x000000d9))
-                // Banner: live mirror of the native search field — native input
-                // flowing into GPUI state.
+                .justify_between()
+                .shadow_card()
+                .opacity(if dimmed { 0.35 } else { 1. })
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .px_6()
-                        .py_2()
-                        .bg(rgba(0x78788014))
-                        .border_b_1()
-                        .border_color(rgba(0x3c3c431f))
-                        .text_size(px(11.))
-                        .text_color(rgba(0x3c3c4380))
-                        .child("Search:")
-                        .child(mirror_chip(&self.query, "type in the sidebar…"))
-                        .child(div().w_2())
-                        .child("Address:")
-                        .child(mirror_chip(&self.address, "type below…")),
+                        .gap_1p5()
+                        .child(div().size(px(8.)).rounded_full().bg(rgb(metric.accent)))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(0x71717a))
+                                .child(metric.label),
+                        ),
                 )
                 .child(
+                    div()
+                        .text_size(px(24.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0x09090b))
+                        .child(metric.value),
+                )
+        }
+
+        /// A live equalizer: every bar animates continuously, driven by GPUI's
+        /// animation system at the display refresh rate.
+        fn equalizer(&self) -> impl IntoElement {
+            div()
+                .h(px(180.))
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(0xe4e4e7))
+                .bg(gpui::white())
+                .shadow_card()
+                .p_4()
+                .flex()
+                .items_end()
+                .gap(px(5.))
+                .children((0..44usize).map(|i| {
+                    div()
+                        .flex_1()
+                        .rounded_sm()
+                        .bg(linear_gradient(
+                            0.,
+                            linear_color_stop(rgb(CHART_2), 0.),
+                            linear_color_stop(rgba(0x2a9d9066), 1.),
+                        ))
+                        .with_animation(
+                            ("bar", i),
+                            Animation::new(Duration::from_millis(2400)).repeat(),
+                            move |bar, delta| {
+                                let phase = delta * std::f32::consts::TAU;
+                                let wave = (phase + i as f32 * 0.45).sin() * 0.5 + 0.5;
+                                let ripple = (phase * 2. + i as f32 * 0.9).cos() * 0.5 + 0.5;
+                                let level = 0.15 + 0.85 * (0.65 * wave + 0.35 * ripple);
+                                bar.h(px(8. + 140. * level))
+                            },
+                        )
+                }))
+        }
+
+        fn pane_dashboard(&self, _cx: &mut Context<Self>) -> gpui::AnyElement {
+            let capture = self.info_anchor.clone();
+            let anchor = self.info_anchor.clone();
             div()
                 .flex()
                 .flex_col()
-                .flex_1()
-                .p_6()
-                .gap_4()
-                // Sender row.
+                .gap_3()
+                // Title row; the native search field floats over its right end.
                 .child(
                     div()
                         .flex()
@@ -414,124 +478,31 @@ mod example {
                         .gap_3()
                         .child(
                             div()
-                                .size(px(36.))
-                                .rounded_full()
-                                .bg(rgb(0x6366f1))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(gpui::white())
-                                .text_size(px(14.))
+                                .text_size(px(15.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("AC"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("Alex Chen"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(rgba(0x3c3c4380))
-                                        .child("alex@example.com · 9:41 AM"),
-                                ),
-                        ),
-                )
-                // Subject.
-                .child(
-                    div()
-                        .text_size(px(20.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Migrating our content pane to GPUI"),
-                )
-                // Body.
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .text_size(px(13.))
-                        .text_color(rgba(0x000000b3))
-                        .child(
-                            "The window, the vibrant sidebar, and the search field on the left \
-                             are still plain AppKit. This message pane is a GPUI window hosted \
-                             in a sub-view via WindowOptions::host_window_handle.",
-                        )
-                        .child(
-                            "That lets an existing native application adopt GPUI one pane at a \
-                             time — same window, two UI stacks, one input story.",
-                        ),
-                )
-                .child(div().flex_1())
-                // Reserved row: the native NSTextField "Address" (layered above
-                // this GPUI window by AppKit) sits here.
-                .child(div().h(px(34.)))
-                .child(div().h(px(1.)).w_full().bg(rgba(0x3c3c431f)))
-                // Actions.
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .id("reply")
-                                .px_4()
-                                .py_1p5()
-                                .rounded_md()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .bg(rgb(0x1d1d1f))
-                                .text_color(gpui::white())
-                                .hover(|style| style.bg(rgb(0x2c2c2e)))
-                                .active(|style| style.bg(rgb(0x3a3a3c)))
-                                .child(if self.replied { "Replied ✓" } else { "Reply" })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.replied = true;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id("forward")
-                                .px_4()
-                                .py_1p5()
-                                .rounded_md()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .bg(rgba(0x7878801f))
-                                .hover(|style| style.bg(rgba(0x78788033)))
-                                .active(|style| style.bg(rgba(0x78788047)))
-                                .child("Forward"),
+                                .child("Live Metrics"),
                         )
                         .child({
-                            let capture = self.more_bounds.clone();
-                            let anchor = self.more_bounds.clone();
                             div()
                                 .relative()
                                 .child(
                                     div()
-                                        .id("more")
-                                        .px_4()
-                                        .py_1p5()
+                                        .id("details")
+                                        .px_2p5()
+                                        .py_0p5()
                                         .rounded_md()
-                                        .text_size(px(13.))
+                                        .text_size(px(12.))
                                         .font_weight(FontWeight::MEDIUM)
-                                        .bg(rgba(0x7878801f))
-                                        .hover(|style| style.bg(rgba(0x78788033)))
-                                        .active(|style| style.bg(rgba(0x78788047)))
-                                        .child("More ▾")
+                                        .bg(rgb(0xf4f4f5))
+                                        .text_color(rgb(0x18181b))
+                                        .hover(|style| style.bg(rgb(0xe4e4e7)))
+                                        .active(|style| style.bg(rgb(0xd4d4d8)))
+                                        .child("Details ▾")
                                         .on_click(move |_, window, cx| {
-                                            open_quick_actions(anchor.get(), window, cx);
+                                            open_info_popover(anchor.get(), window, cx);
                                         }),
                                 )
                                 .child(
-                                    // Records the button's bounds for anchoring.
                                     canvas(
                                         move |bounds, _, _| capture.set(bounds),
                                         |_, _, _, _| {},
@@ -539,181 +510,324 @@ mod example {
                                     .absolute()
                                     .inset_0(),
                                 )
-                        }),
-                ))
+                        })
+                        .child(div().flex_1())
+                        // Reserved for the native search field floating above.
+                        .child(div().w(px(200.)).h(px(26.))),
+                )
+                // Annotation row: what is AppKit, what is GPUI.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(stack_badge(CHART_1, "▲ system tab bar — AppKit"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.))
+                                .text_color(rgb(0xa1a1aa))
+                                .child(if self.query.is_empty() {
+                                    "⌘1/⌘2 switch the native tabs via GPUI key bindings."
+                                        .to_string()
+                                } else {
+                                    format!("native search → GPUI filter: “{}”", self.query)
+                                }),
+                        )
+                        .child(
+                            div()
+                                .w(px(200.))
+                                .flex()
+                                .justify_center()
+                                .child(stack_badge(CHART_1, "NSSearchField — AppKit ▲")),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .children(METRICS.iter().map(|metric| self.metric_card(metric))),
+                )
+                .child(self.equalizer())
+                .into_any_element()
         }
+
+        fn pane_showcase(&self, _cx: &mut Context<Self>) -> gpui::AnyElement {
+            const TILES: [(u32, u32, &str); 6] = [
+                (0x6366f1, 0x8b5cf6, "Gradients"),
+                (0x0ea5e9, 0x6366f1, "Shadows"),
+                (0x14b8a6, 0x0ea5e9, "Layers"),
+                (0x8b5cf6, 0xd946ef, "Hover states"),
+                (0x64748b, 0x334155, "Typography"),
+                (0x1e293b, 0x0f172a, "Animation"),
+            ];
+
+            fn tile(index: usize, from: u32, to: u32, label: &'static str) -> impl IntoElement {
+                div()
+                    .id(index)
+                    .flex_1()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(0xe4e4e7))
+                    .bg(gpui::white())
+                    .shadow_card()
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .hover(|style| style.shadow_card_hover())
+                    .child(div().h(px(64.)).rounded_md().bg(linear_gradient(
+                        35. + index as f32 * 55.,
+                        linear_color_stop(rgb(from), 0.),
+                        linear_color_stop(rgb(to), 1.),
+                    )))
+                    .child(
+                        div()
+                            .px_1()
+                            .pb_1()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x09090b))
+                            .child(label),
+                    )
+            }
+
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(0xa1a1aa))
+                        .child(
+                            "Gradients, shadows, hover states, and per-frame animation — \
+                             rendered by GPUI inside a native window tab.",
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .children((0..3).map(|i| tile(i, TILES[i].0, TILES[i].1, TILES[i].2))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .children((3..6).map(|i| tile(i, TILES[i].0, TILES[i].1, TILES[i].2))),
+                )
+                .child(
+                    div()
+                        .h(px(48.))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(0xe4e4e7))
+                        .bg(gpui::white())
+                        .shadow_card()
+                        .flex()
+                        .gap_2()
+                        .items_center()
+                        .justify_center()
+                        .children((0..7usize).map(|i| {
+                            div()
+                                .rounded_full()
+                                .bg(rgb(CHART_2))
+                                .with_animation(
+                                    ("dot", i),
+                                    Animation::new(Duration::from_millis(1400)).repeat(),
+                                    move |dot, delta| {
+                                        let phase = delta * std::f32::consts::TAU;
+                                        let pulse = ((phase + i as f32 * 0.8).sin() * 0.5 + 0.5)
+                                            .powf(1.5);
+                                        dot.size(px(6. + 8. * pulse))
+                                    },
+                                )
+                        })),
+                )
+                .into_any_element()
+        }
+    }
+
+    impl Render for DemoApp {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(gpui::white())
+                .p_6()
+                .text_color(rgb(0x09090b))
+                .key_context(APP_CONTEXT)
+                .track_focus(&self.focus_handle)
+                .on_action(cx.listener(|this, _: &SelectTab1, _, cx| this.select_tab(0, cx)))
+                .on_action(cx.listener(|this, _: &SelectTab2, _, cx| this.select_tab(1, cx)))
+                .child(match self.pane {
+                    Pane::Dashboard => self.pane_dashboard(cx),
+                    Pane::Showcase => self.pane_showcase(cx),
+                })
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_3()
+                        .right_3()
+                        .child(stack_badge(CHART_2, "this whole pane — GPUI")),
+                )
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // The native shell: two windows merged into one native tab group.
+    // ------------------------------------------------------------------------
+
+    /// Builds one native window with a hosted GPUI surface, returning the
+    /// window and the GPUI view's handle for later wiring.
+    fn build_tab_window(
+        cx: &mut App,
+        mtm: MainThreadMarker,
+        title: &str,
+        pane: Pane,
+        with_search: Option<mpsc::Sender<String>>,
+    ) -> (Retained<NSWindow>, gpui::WindowHandle<DemoApp>) {
+        // --- Plain AppKit: the window (plus, for the dashboard, a native
+        // search field layered above the GPUI surface). ---
+        // SAFETY: all objects are created and used on the main thread and are
+        // kept alive for the lifetime of the process (`mem::forget` in `run`).
+        let (native_window, host_view) = unsafe {
+            let rect = NSRect::new(NSPoint::new(180., 160.), NSSize::new(WIDTH, HEIGHT));
+            let style = NSWindowStyleMask::Titled
+                | NSWindowStyleMask::Closable
+                | NSWindowStyleMask::Miniaturizable
+                | NSWindowStyleMask::Resizable;
+            let native_window = NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect,
+                style,
+                NSBackingStoreType::Buffered,
+                false,
+            );
+            native_window.setTitle(&NSString::from_str(title));
+
+            let content_view = native_window
+                .contentView()
+                .expect("native window has a content view");
+            let content_bounds = content_view.bounds().size;
+
+            // The surface GPUI renders into: the whole content area. It
+            // autoresizes, so it follows the content view when the native tab
+            // bar appears.
+            let host_view = NSView::new(mtm);
+            host_view.setFrame(NSRect::new(
+                NSPoint::new(0., 0.),
+                NSSize::new(content_bounds.width, content_bounds.height),
+            ));
+            host_view.setAutoresizingMask(
+                objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                    | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+            content_view.addSubview(&host_view);
+
+            if let Some(tx) = with_search {
+                // A native search field, layered above the GPUI surface in the
+                // pane's header row; pinned to the content view's top edge.
+                let search = NSSearchField::new(mtm);
+                search.setFrame(NSRect::new(
+                    NSPoint::new(
+                        content_bounds.width - 24. - 200.,
+                        content_bounds.height - 24. - 25.,
+                    ),
+                    NSSize::new(200., 26.),
+                ));
+                search.setAutoresizingMask(
+                    objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin
+                        | objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin,
+                );
+                search.setPlaceholderString(Some(&NSString::from_str("Filter metrics")));
+                let search_handler = SearchHandler::new(tx);
+                let _: () = msg_send![&*search, setDelegate: &*search_handler];
+                content_view.addSubview(&search);
+                // Both live for the rest of the process.
+                std::mem::forget((search, search_handler));
+            }
+
+            (native_window, host_view)
+        };
+
+        // --- GPUI: render the pane into the host view. ---
+        let host_size = unsafe { NSView::bounds(&host_view) }.size;
+        let host_ptr = NonNull::new(Retained::as_ptr(&host_view) as *mut _)
+            .expect("host view pointer is non-null");
+        let gpui_window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: point(px(0.), px(0.)),
+                        size: size(px(host_size.width as f32), px(host_size.height as f32)),
+                    })),
+                    host_window_handle: Some(RawWindowHandle::AppKit(AppKitWindowHandle::new(
+                        host_ptr,
+                    ))),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let app = cx.new(|cx| DemoApp {
+                        focus_handle: cx.focus_handle(),
+                        pane,
+                        query: String::new(),
+                        tab_windows: (0, 0),
+                        info_anchor: Rc::new(Cell::new(Bounds::default())),
+                    });
+                    let focus_handle = app.read(cx).focus_handle.clone();
+                    window.focus(&focus_handle, cx);
+                    app
+                },
+            )
+            .expect("failed to open hosted window");
+
+        // The host view lives for the rest of the process.
+        std::mem::forget(host_view);
+        (native_window, gpui_window)
     }
 
     pub fn run() {
         application().run(|cx: &mut App| {
             cx.bind_keys([
-                KeyBinding::new("cmd-n", NewDocument, Some(KEY_CONTEXT)),
-                KeyBinding::new("cmd-o", OpenRecent, Some(KEY_CONTEXT)),
-                KeyBinding::new("shift-cmd-s", Share, Some(KEY_CONTEXT)),
+                KeyBinding::new("cmd-1", SelectTab1, Some(APP_CONTEXT)),
+                KeyBinding::new("cmd-2", SelectTab2, Some(APP_CONTEXT)),
+                KeyBinding::new("enter", DismissInfo, Some(POPOVER_CONTEXT)),
             ]);
             let mtm = MainThreadMarker::new().expect("must run on the main thread");
 
             let (search_tx, search_rx) = mpsc::channel::<String>();
 
-            // --- Plain AppKit: window + vibrant sidebar + search + navigation. ---
-            // SAFETY: all objects are created and used on the main thread and are
-            // kept alive for the lifetime of the process (`mem::forget` below).
-            let (native_window, host_view, card_host, native_sidebar) = unsafe {
-                let rect = NSRect::new(NSPoint::new(160., 160.), NSSize::new(WIDTH, HEIGHT));
-                let style = NSWindowStyleMask::Titled
-                    | NSWindowStyleMask::Closable
-                    | NSWindowStyleMask::Miniaturizable;
-                let native_window = NSWindow::initWithContentRect_styleMask_backing_defer(
-                    NSWindow::alloc(mtm),
-                    rect,
-                    style,
-                    NSBackingStoreType::Buffered,
-                    false,
-                );
-                native_window.setTitle(&NSString::from_str("Inbox — AppKit shell, GPUI content"));
-                let content_view = native_window
-                    .contentView()
-                    .expect("native window has a content view");
-                let content_height = content_view.bounds().size.height;
+            let (dashboard_window, dashboard_app) =
+                build_tab_window(cx, mtm, "Dashboard", Pane::Dashboard, Some(search_tx));
+            let (showcase_window, showcase_app) =
+                build_tab_window(cx, mtm, "Showcase", Pane::Showcase, None);
 
-                // Vibrant sidebar.
-                let sidebar = NSVisualEffectView::new(mtm);
-                sidebar.setMaterial(NSVisualEffectMaterial::Sidebar);
-                sidebar.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-                sidebar.setFrame(NSRect::new(
-                    NSPoint::new(0., 0.),
-                    NSSize::new(SIDEBAR, content_height),
-                ));
-                sidebar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
-                content_view.addSubview(&sidebar);
+            // Merge the two native windows into one tab group — the same
+            // native tab bar Terminal, Safari, or Ghostty use.
+            // SAFETY: main thread; both windows are alive (forgotten below).
+            unsafe {
+                dashboard_window.makeKeyAndOrderFront(None);
+                dashboard_window
+                    .addTabbedWindow_ordered(&showcase_window, NSWindowOrderingMode::Above);
+                dashboard_window.makeKeyAndOrderFront(None);
+            }
 
-                // Native search field.
-                let search = NSSearchField::new(mtm);
-                search.setFrame(NSRect::new(
-                    NSPoint::new(12., content_height - 40.),
-                    NSSize::new(SIDEBAR - 24., 28.),
-                ));
-                search.setPlaceholderString(Some(&NSString::from_str("Search")));
-                sidebar.addSubview(&search);
+            // Tell both panes about the native windows, for ⌘1/⌘2.
+            let tab_windows = (
+                Retained::as_ptr(&dashboard_window) as usize,
+                Retained::as_ptr(&showcase_window) as usize,
+            );
+            for handle in [&dashboard_app, &showcase_app] {
+                let _ = handle.update(cx, |app, _, _| {
+                    app.tab_windows = tab_windows;
+                });
+            }
 
-                // Forward the search field's text changes to GPUI.
-                let search_handler = SearchHandler::new(search_tx);
-                let _: () = msg_send![&*search, setDelegate: &*search_handler];
-
-                // Navigation list.
-                for (index, item) in ["📥  Inbox", "📤  Sent", "📝  Drafts", "🗂  Archive"]
-                    .iter()
-                    .enumerate()
-                {
-                    let label = NSTextField::labelWithString(&NSString::from_str(item), mtm);
-                    label.setFrame(NSRect::new(
-                        NSPoint::new(16., content_height - 76. - index as f64 * 30.),
-                        NSSize::new(SIDEBAR - 32., 20.),
-                    ));
-                    sidebar.addSubview(&label);
-                }
-
-                // A small host at the bottom of the *native* sidebar for a
-                // GPUI-rendered account card.
-                let card_host = NSView::new(mtm);
-                card_host.setFrame(NSRect::new(
-                    NSPoint::new(12., 12.),
-                    NSSize::new(SIDEBAR - 24., 52.),
-                ));
-                sidebar.addSubview(&card_host);
-
-                // The pane GPUI renders into: everything right of the sidebar.
-                let host_view = NSView::new(mtm);
-                host_view.setFrame(NSRect::new(
-                    NSPoint::new(SIDEBAR, 0.),
-                    NSSize::new(WIDTH - SIDEBAR, content_height),
-                ));
-                host_view.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewWidthSizable
-                        | NSAutoresizingMaskOptions::ViewHeightSizable,
-                );
-                content_view.addSubview(&host_view);
-
-                native_window.makeKeyAndOrderFront(None);
-                (
-                    native_window,
-                    host_view,
-                    card_host,
-                    (sidebar, search, search_handler),
-                )
-            };
-
-            // --- GPUI: render the message pane into the host view. ---
-            let host_size = unsafe { NSView::bounds(&host_view) }.size;
-            let host_ptr = NonNull::new(Retained::as_ptr(&host_view) as *mut _)
-                .expect("host view pointer is non-null");
-            let pane = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(Bounds {
-                            origin: point(px(0.), px(0.)),
-                            size: size(px(host_size.width as f32), px(host_size.height as f32)),
-                        })),
-                        host_window_handle: Some(RawWindowHandle::AppKit(
-                            AppKitWindowHandle::new(host_ptr),
-                        )),
-                        ..Default::default()
-                    },
-                    |_, cx| {
-                        cx.new(|_| MessagePane {
-                            replied: false,
-                            query: String::new(),
-                            address: String::new(),
-                            more_bounds: Rc::new(Cell::new(Bounds::default())),
-                        })
-                    },
-                )
-                .expect("failed to open hosted window");
-
-            // --- GPUI: a second hosted window — the sidebar's account card. ---
-            let card_size = unsafe { NSView::bounds(&card_host) }.size;
-            let card_ptr = NonNull::new(Retained::as_ptr(&card_host) as *mut _)
-                .expect("card host pointer is non-null");
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds {
-                        origin: point(px(0.), px(0.)),
-                        size: size(px(card_size.width as f32), px(card_size.height as f32)),
-                    })),
-                    host_window_handle: Some(RawWindowHandle::AppKit(AppKitWindowHandle::new(
-                        card_ptr,
-                    ))),
-                    // Let the sidebar's vibrancy show through the card.
-                    window_background: gpui::WindowBackgroundAppearance::Transparent,
-                    ..Default::default()
-                },
-                |_, cx| cx.new(|_| AccountCard),
-            )
-            .expect("failed to open hosted card window");
-
-            // --- Native above GPUI: an "Address" text field layered over the
-            // GPUI pane. AppKit's view hierarchy makes this trivial — add the
-            // control as a later subview of the host view, above the GPUI view.
-            // It receives its own input; everything around it goes to GPUI, and
-            // its text streams into the GPUI pane like the search field's.
-            // SAFETY: main thread; the field is kept alive by the forget below.
-            let (addr_tx, addr_rx) = mpsc::channel::<String>();
-            let address_field = unsafe {
-                let field = NSTextField::new(mtm);
-                field.setPlaceholderString(Some(&NSString::from_str(
-                    "Address — native NSTextField over GPUI",
-                )));
-                field.setFrame(NSRect::new(
-                    NSPoint::new(24., 92.),
-                    NSSize::new(host_size.width - 48., 26.),
-                ));
-                let handler = SearchHandler::new(addr_tx);
-                let _: () = msg_send![&*field, setDelegate: &*handler];
-                host_view.addSubview(&field);
-                (field, handler)
-            };
-
-            // Mirror the native search field's text into the GPUI pane.
+            // Stream the native search field's text into the dashboard pane.
             cx.spawn(async move |cx| {
                 loop {
                     cx.background_executor()
@@ -723,18 +837,9 @@ mod example {
                     while let Ok(text) = search_rx.try_recv() {
                         latest_query = Some(text);
                     }
-                    let mut latest_address = None;
-                    while let Ok(text) = addr_rx.try_recv() {
-                        latest_address = Some(text);
-                    }
-                    if latest_query.is_some() || latest_address.is_some() {
-                        let _ = pane.update(cx, |pane, _, cx| {
-                            if let Some(text) = latest_query {
-                                pane.query = text;
-                            }
-                            if let Some(text) = latest_address {
-                                pane.address = text;
-                            }
+                    if let Some(text) = latest_query {
+                        let _ = dashboard_app.update(cx, |app, _, cx| {
+                            app.query = text;
                             cx.notify();
                         });
                     }
@@ -742,14 +847,8 @@ mod example {
             })
             .detach();
 
-            // The native window lives for the rest of the process.
-            std::mem::forget((
-                native_window,
-                host_view,
-                card_host,
-                native_sidebar,
-                address_field,
-            ));
+            // The native windows live for the rest of the process.
+            std::mem::forget((dashboard_window, showcase_window));
 
             cx.activate(true);
         });

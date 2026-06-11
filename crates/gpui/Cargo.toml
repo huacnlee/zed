@@ -172,17 +172,13 @@ reqwest_client = { workspace = true, features = ["test-support"] }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = "0.6"
 objc2-app-kit = { workspace = true, features = [
-    "NSButton",
     "NSControl",
-    "NSDatePicker",
-    "NSDatePickerCell",
     "NSPopover",
     "NSResponder",
     "NSSearchField",
     "NSTextField",
     "NSView",
     "NSViewController",
-    "NSVisualEffectView",
     "NSWindow",
 ] }
 objc2-foundation = { workspace = true }
