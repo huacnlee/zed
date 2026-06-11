@@ -48,7 +48,7 @@ use futures::channel::oneshot;
 use image::RgbaImage;
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder as _, Frame};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 use scheduler::Instant;
 pub use scheduler::RunnableMeta;
 use schemars::JsonSchema;
@@ -1525,6 +1525,24 @@ pub struct WindowOptions {
 
     /// Tab group name, allows opening the window as a native tab on macOS 10.12+. Windows with the same tabbing identifier will be grouped together.
     pub tabbing_identifier: Option<String>,
+
+    /// If set, render this window into the given existing native view instead
+    /// of creating an operating-system window of its own. The window draws
+    /// into, and receives input from, the host view; input positions are
+    /// always local to the GPUI view. The caller retains ownership of the host
+    /// view and its window, and must close this window before the host goes
+    /// away. Options that configure an OS window (`titlebar`, `kind`,
+    /// `is_movable`, etc.) are ignored.
+    ///
+    /// Platform-specific:
+    /// - macOS: an `AppKit` handle whose `ns_view` is installed in a window;
+    ///   the GPUI view is added as an autoresizing subview (e.g. to host GPUI
+    ///   content inside a shown `NSPopover`, an `NSStatusItem`, or an existing
+    ///   AppKit application).
+    /// - Windows: a `Win32` handle; a `WS_CHILD` window is created inside it.
+    /// - X11: an `Xcb`/`Xlib` handle; a child X window is created inside it.
+    /// - Wayland: not yet supported (`open_window` returns an error).
+    pub host_window_handle: Option<RawWindowHandle>,
 }
 
 /// The variables that can be configured when creating a new window
@@ -1579,6 +1597,10 @@ pub struct WindowParams {
     pub window_min_size: Option<Size<Pixels>>,
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
+
+    /// If set, render into this existing native view instead of creating an OS
+    /// window (see [`WindowOptions::host_window_handle`]).
+    pub host_window_handle: Option<RawWindowHandle>,
 }
 
 /// Represents the status of how a window should be opened.
@@ -1638,6 +1660,7 @@ impl Default for WindowOptions {
             window_min_size: None,
             window_decorations: None,
             tabbing_identifier: None,
+            host_window_handle: None,
         }
     }
 }
@@ -1678,6 +1701,7 @@ pub enum WindowKind {
     /// until the modal window is closed
     Dialog,
 }
+
 
 /// The appearance of the window, as defined by the operating system.
 ///
