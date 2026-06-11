@@ -172,12 +172,17 @@ reqwest_client = { workspace = true, features = ["test-support"] }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = "0.6"
 objc2-app-kit = { workspace = true, features = [
+    "NSButton",
     "NSControl",
+    "NSDatePicker",
+    "NSDatePickerCell",
     "NSPopover",
     "NSResponder",
+    "NSSearchField",
     "NSTextField",
     "NSView",
     "NSViewController",
+    "NSVisualEffectView",
     "NSWindow",
 ] }
 objc2-foundation = { workspace = true }
@@ -201,10 +206,6 @@ cbindgen = { version = "0.28.0", default-features = false }
 [[example]]
 name = "hello_world"
 path = "examples/hello_world.rs"
-
-[[example]]
-name = "hosted_popover"
-path = "examples/hosted_popover.rs"
 
 [[example]]
 name = "hosted_window"

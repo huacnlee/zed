@@ -645,12 +645,15 @@ impl MacWindowState {
     }
 
     fn content_size(&self) -> Size<Pixels> {
-        // The GPUI view's own bounds. For regular windows this equals the window
-        // content view's frame (the view fills it); for views hosted in an
-        // external window (whose content view isn't ours) it is the only
-        // correct answer.
+        if !self.owns_native_window {
+            // Hosted views: the host window's content view isn't ours — use the
+            // GPUI view's own bounds.
+            let NSSize { width, height, .. } =
+                unsafe { NSView::bounds(self.native_view.as_ptr()) }.size;
+            return size(px(width as f32), px(height as f32));
+        }
         let NSSize { width, height, .. } =
-            unsafe { NSView::bounds(self.native_view.as_ptr()) }.size;
+            unsafe { NSView::frame(self.native_window.contentView()) }.size;
         size(px(width as f32), px(height as f32))
     }
 
@@ -1375,23 +1378,27 @@ impl PlatformWindow for MacWindow {
 
     fn mouse_position(&self) -> Point<Pixels> {
         let lock = self.0.lock();
+        if !lock.owns_native_window {
+            // Hosted views: window coordinates -> view-local coordinates (the
+            // view can be inset anywhere within the host window).
+            let position = unsafe { lock.native_window.mouseLocationOutsideOfEventStream() };
+            let origin: NSPoint = unsafe {
+                msg_send![
+                    lock.native_view.as_ptr(),
+                    convertPoint: NSPoint::new(0., 0.)
+                    toView: nil
+                ]
+            };
+            let height =
+                px(unsafe { NSView::bounds(lock.native_view.as_ptr()) }.size.height as f32);
+            let mut position = convert_mouse_position(position, height);
+            position.x -= px(origin.x as f32);
+            position.y += px(origin.y as f32);
+            return position;
+        }
         let position = unsafe { lock.native_window.mouseLocationOutsideOfEventStream() };
-        // Window coordinates -> view-local coordinates. A no-op for regular
-        // windows (whose view sits at the window origin), required for views
-        // hosted inside a larger external window.
-        let origin: NSPoint = unsafe {
-            msg_send![
-                lock.native_view.as_ptr(),
-                convertPoint: NSPoint::new(0., 0.)
-                toView: nil
-            ]
-        };
-        let height = px(unsafe { NSView::bounds(lock.native_view.as_ptr()) }.size.height as f32);
         drop(lock);
-        let mut position = convert_mouse_position(position, height);
-        position.x -= px(origin.x as f32);
-        position.y += px(origin.y as f32);
-        position
+        convert_mouse_position(position, self.content_size().height)
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -1905,6 +1912,14 @@ impl PlatformWindow for MacWindow {
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
         let mut lock = self.0.lock();
 
+        // The accessibility adapter subclasses the NSWindow. A hosted view's
+        // window belongs to the host application (and may host several GPUI
+        // windows) — don't subclass it. Accessibility for hosted windows is
+        // future work.
+        if !lock.owns_native_window {
+            return;
+        }
+
         let activation_handler = A11yActivationHandler {
             callback: callbacks.activation,
         };
@@ -2310,15 +2325,15 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
 
     if let Some(mut event) = event {
-        // Event locations are window-relative, while GPUI positions are relative
-        // to its view. For regular windows the view sits at the window origin so
-        // this is a no-op, but when the view is hosted inside a larger external
-        // window (e.g. an NSPopover's internal window, which insets the content
-        // for its arrow/chrome) the positions must be shifted into view-local
+        // Hosted views only: event locations are window-relative, while GPUI
+        // positions are relative to its view. A regular window's view sits at
+        // the window origin, but a hosted view can be inset anywhere within an
+        // external window (e.g. an NSPopover's internal window insets the
+        // content for its arrow/chrome), so shift positions into view-local
         // space: with the view's bottom-left corner at (ox, oy) in window
         // coords, the correction is x -= ox, y += oy (y was already flipped
         // against the view height).
-        {
+        if !lock.owns_native_window {
             let origin: NSPoint = unsafe {
                 msg_send![
                     lock.native_view.as_ptr(),
@@ -2334,7 +2349,7 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
             // fold the difference into the correction. Zero for events that
             // already belong to our window.
             let mut delta = NSPoint::new(0., 0.);
-            if !lock.owns_native_window {
+            {
                 let event_window: id = unsafe { msg_send![native_event, window] };
                 if event_window != lock.native_window {
                     unsafe {
@@ -2384,11 +2399,10 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
                 _ => {}
             }
 
-            // For hosted views, a hover move over the host window's chrome
-            // (outside the view) would otherwise leave a stale hover state —
-            // there is no tracking area to deliver mouse-exited. Convert it.
-            if !lock.owns_native_window
-                && let PlatformInput::MouseMove(e) = &event
+            // A hover move over the host window's chrome (outside the view)
+            // would otherwise leave a stale hover state — there is no tracking
+            // area to deliver mouse-exited. Convert it.
+            if let PlatformInput::MouseMove(e) = &event
                 && e.pressed_button.is_none()
             {
                 let bounds = unsafe { NSView::bounds(lock.native_view.as_ptr()) };
