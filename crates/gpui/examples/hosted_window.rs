@@ -46,7 +46,7 @@ mod example {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    actions!(hosted_window, [SelectTab1, SelectTab2, DismissInfo]);
+    actions!(hosted_window, [SelectTab1, SelectTab2, DismissInfo, ToggleFeature]);
 
     const APP_CONTEXT: &str = "HostedDemo";
     const POPOVER_CONTEXT: &str = "InfoPopover";
@@ -98,54 +98,148 @@ mod example {
     // GPUI: the info popover content.
     // ------------------------------------------------------------------------
 
-    /// Info panel hosted inside a native `NSPopover`. ⏎ is a real GPUI key
-    /// binding — hosted windows receive keyboard input.
+    /// Info panel hosted inside a native `NSPopover`.
+    /// Demonstrates click, hover, and keyboard input inside a hosted window.
     struct InfoPopover {
         focus_handle: FocusHandle,
-        acknowledged: bool,
+        enter_pressed: bool,
+        toggle_on: bool,
+        hover_count: u32,
     }
 
     impl Render for InfoPopover {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let toggle_on = self.toggle_on;
+            let hover_count = self.hover_count;
+
             div()
                 .flex()
                 .flex_col()
                 .gap_2()
                 .p_3()
                 .size_full()
-                .text_color(rgba(0x000000d9))
+                .text_color(rgb(0x09090b))
                 .key_context(POPOVER_CONTEXT)
                 .track_focus(&self.focus_handle)
                 .on_action(cx.listener(|this, _: &DismissInfo, _, cx| {
-                    this.acknowledged = true;
+                    this.enter_pressed = true;
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("This panel is GPUI too"),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgba(0x3c3c4380))
-                        .child(
-                            "A GPUI window hosted inside a system NSPopover — arrow, vibrancy \
-                             and transient dismissal are AppKit; the content is GPUI. Press ⏎.",
-                        ),
-                )
-                .child(div().flex_1())
+                .on_action(cx.listener(|this, _: &ToggleFeature, _, cx| {
+                    this.toggle_on = !this.toggle_on;
+                    cx.notify();
+                }))
+                // header
                 .child(
                     div()
                         .flex()
-                        .justify_end()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(if self.acknowledged {
-                            "⏎ received by GPUI ✓"
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("NSPopover + GPUI"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(0x52525b))
+                                .child("⏎ · ⌘K"),
+                        ),
+                )
+                // description
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(0x52525b))
+                        .child("Arrow, vibrancy & transient dismissal are AppKit. Interaction below is GPUI."),
+                )
+                // interactive row
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .mt_1()
+                        // click button
+                        .child(
+                            div()
+                                .id("popover-btn")
+                                .flex()
+                                .items_center()
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(0xe4e4e7))
+                                .bg(rgb(0xfafafa))
+                                .text_size(px(12.))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0xf4f4f5)).border_color(rgb(0xd4d4d8)))
+                                .active(|s| s.bg(rgb(0xe4e4e7)))
+                                .on_mouse_move(cx.listener(|this, _, _, cx| {
+                                    this.hover_count += 1;
+                                    cx.notify();
+                                }))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_on = !this.toggle_on;
+                                    cx.notify();
+                                }))
+                                .child(if toggle_on { "● On" } else { "○ Off" }),
+                        )
+                        // ⌘K toggle
+                        .child(
+                            div()
+                                .id("popover-cmd-k")
+                                .flex()
+                                .items_center()
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(0xe4e4e7))
+                                .bg(rgb(0xfafafa))
+                                .text_size(px(12.))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0xf4f4f5)))
+                                .active(|s| s.bg(rgb(0xe4e4e7)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.enter_pressed = !this.enter_pressed;
+                                    cx.notify();
+                                }))
+                                .child(if self.enter_pressed { "⌘K ✓" } else { "⌘K —" }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.))
+                                .text_color(rgb(0x71717a))
+                                .text_align(gpui::TextAlign::Right)
+                                .child(format!("hover moves: {hover_count}")),
+                        ),
+                )
+                // status row
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_size(px(11.))
+                        .text_color(rgb(0x71717a))
+                        .child(
+                            div()
+                                .w(px(6.))
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(if toggle_on { rgb(CHART_2) } else { rgb(0xd4d4d8) }),
+                        )
+                        .child(if toggle_on { "feature enabled" } else { "feature disabled" })
+                        .child(div().flex_1())
+                        .child(if self.enter_pressed {
+                            "⏎ received ✓"
                         } else {
-                            "waiting for ⏎ …"
+                            "press ⏎ to confirm"
                         }),
                 )
         }
@@ -220,7 +314,9 @@ mod example {
                 |window, cx| {
                     let content = cx.new(|cx| InfoPopover {
                         focus_handle: cx.focus_handle(),
-                        acknowledged: false,
+                        enter_pressed: false,
+                        toggle_on: false,
+                        hover_count: 0,
                     });
                     let focus_handle = content.read(cx).focus_handle.clone();
                     window.focus(&focus_handle, cx);
@@ -309,44 +405,6 @@ mod example {
         info_anchor: Rc<Cell<Bounds<Pixels>>>,
     }
 
-    /// shadcn-style box shadows — much subtler than the tailwind presets.
-    trait ShadcnShadow: Styled + Sized {
-        /// `shadow-xs`: 0 1px 2px rgb(0 0 0 / 0.05)
-        fn shadow_card(mut self) -> Self {
-            self.style().box_shadow = Some(vec![gpui::BoxShadow {
-                color: gpui::hsla(0., 0., 0., 0.05),
-                offset: point(px(0.), px(1.)),
-                blur_radius: px(2.),
-                spread_radius: px(0.),
-                inset: false,
-            }]);
-            self
-        }
-
-        /// `shadow-md`: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)
-        fn shadow_card_hover(mut self) -> Self {
-            self.style().box_shadow = Some(vec![
-                gpui::BoxShadow {
-                    color: gpui::hsla(0., 0., 0., 0.1),
-                    offset: point(px(0.), px(4.)),
-                    blur_radius: px(6.),
-                    spread_radius: px(-1.),
-                    inset: false,
-                },
-                gpui::BoxShadow {
-                    color: gpui::hsla(0., 0., 0., 0.1),
-                    offset: point(px(0.), px(2.)),
-                    blur_radius: px(4.),
-                    spread_radius: px(-2.),
-                    inset: false,
-                },
-            ]);
-            self
-        }
-    }
-
-    impl<T: Styled> ShadcnShadow for T {}
-
     /// A small outline badge (shadcn-style) labelling which UI stack draws a
     /// region, with a colored dot.
     fn stack_badge(color: u32, label: &'static str) -> impl IntoElement {
@@ -362,7 +420,7 @@ mod example {
             .bg(gpui::white())
             .text_size(px(11.))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0x71717a))
+            .text_color(rgb(0x52525b))
             .child(div().size(px(6.)).rounded_full().bg(rgb(color)))
             .child(label)
     }
@@ -402,7 +460,7 @@ mod example {
                 .flex()
                 .flex_col()
                 .justify_between()
-                .shadow_card()
+                
                 .opacity(if dimmed { 0.35 } else { 1. })
                 .child(
                     div()
@@ -413,7 +471,7 @@ mod example {
                         .child(
                             div()
                                 .text_size(px(12.))
-                                .text_color(rgb(0x71717a))
+                                .text_color(rgb(0x52525b))
                                 .child(metric.label),
                         ),
                 )
@@ -435,7 +493,7 @@ mod example {
                 .border_1()
                 .border_color(rgb(0xe4e4e7))
                 .bg(gpui::white())
-                .shadow_card()
+                
                 .p_4()
                 .flex()
                 .items_end()
@@ -444,11 +502,7 @@ mod example {
                     div()
                         .flex_1()
                         .rounded_sm()
-                        .bg(linear_gradient(
-                            0.,
-                            linear_color_stop(rgb(CHART_2), 0.),
-                            linear_color_stop(rgba(0x2a9d9066), 1.),
-                        ))
+                        .bg(rgb(0x09090b))
                         .with_animation(
                             ("bar", i),
                             Animation::new(Duration::from_millis(2400)).repeat(),
@@ -526,7 +580,7 @@ mod example {
                             div()
                                 .flex_1()
                                 .text_size(px(11.))
-                                .text_color(rgb(0xa1a1aa))
+                                .text_color(rgb(0x71717a))
                                 .child(if self.query.is_empty() {
                                     "⌘1/⌘2 switch the native tabs via GPUI key bindings."
                                         .to_string()
@@ -553,16 +607,21 @@ mod example {
         }
 
         fn pane_showcase(&self, _cx: &mut Context<Self>) -> gpui::AnyElement {
-            const TILES: [(u32, u32, &str); 6] = [
-                (0x6366f1, 0x8b5cf6, "Gradients"),
-                (0x0ea5e9, 0x6366f1, "Shadows"),
-                (0x14b8a6, 0x0ea5e9, "Layers"),
-                (0x8b5cf6, 0xd946ef, "Hover states"),
-                (0x64748b, 0x334155, "Typography"),
-                (0x1e293b, 0x0f172a, "Animation"),
-            ];
+            fn gpui_badge() -> impl IntoElement {
+                div()
+                    .flex()
+                    .items_center()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(0xe4e4e7))
+                    .text_size(px(9.))
+                    .text_color(rgb(0xa1a1aa))
+                    .child("GPUI")
+            }
 
-            fn tile(index: usize, from: u32, to: u32, label: &'static str) -> impl IntoElement {
+            fn card(index: usize, label: &'static str, content: impl IntoElement) -> impl IntoElement {
                 div()
                     .id(index)
                     .flex_1()
@@ -570,27 +629,62 @@ mod example {
                     .border_1()
                     .border_color(rgb(0xe4e4e7))
                     .bg(gpui::white())
-                    .shadow_card()
-                    .p_2()
+                    .p_3()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .hover(|style| style.shadow_card_hover())
-                    .child(div().h(px(64.)).rounded_md().bg(linear_gradient(
-                        35. + index as f32 * 55.,
-                        linear_color_stop(rgb(from), 0.),
-                        linear_color_stop(rgb(to), 1.),
-                    )))
+                    .child(content)
                     .child(
                         div()
-                            .px_1()
-                            .pb_1()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0x09090b))
-                            .child(label),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .mt_auto()
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(0xa1a1aa))
+                                    .child(label),
+                            )
+                            .child(gpui_badge()),
                     )
             }
+
+            let gradient_card = card(
+                0,
+                "Gradient",
+                div().h(px(56.)).rounded_md().bg(linear_gradient(
+                    145.,
+                    linear_color_stop(rgb(0x3b82f6), 0.),
+                    linear_color_stop(rgb(0x6366f1), 1.),
+                )),
+            )
+            .into_any_element();
+
+            let text_items: [(&str, &str, FontWeight, Pixels); 5] = [
+                ("Semibold", "The quick brown fox", FontWeight::SEMIBOLD, px(14.)),
+                ("Medium", "jumps over the lazy dog", FontWeight::MEDIUM, px(13.)),
+                ("Normal", "0123456789 — !@#$%", FontWeight::NORMAL, px(12.)),
+                ("Light", "Aa Bb Cc Dd Ee Ff Gg", FontWeight::LIGHT, px(12.)),
+                ("Bold", "GPUI renders text", FontWeight::BOLD, px(15.)),
+            ];
+
+            let mut text_cards: Vec<gpui::AnyElement> = text_items
+                .iter()
+                .enumerate()
+                .map(|(i, (label, sample, weight, size))| {
+                    card(
+                        i + 1,
+                        label,
+                        div()
+                            .text_size(*size)
+                            .font_weight(*weight)
+                            .text_color(rgb(0x09090b))
+                            .child(*sample),
+                    )
+                    .into_any_element()
+                })
+                .collect();
 
             div()
                 .flex()
@@ -598,49 +692,47 @@ mod example {
                 .gap_3()
                 .child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(rgb(0xa1a1aa))
-                        .child(
-                            "Gradients, shadows, hover states, and per-frame animation — \
-                             rendered by GPUI inside a native window tab.",
-                        ),
+                        .flex()
+                        .gap_3()
+                        .child(gradient_card)
+                        .child(text_cards.remove(0))
+                        .child(text_cards.remove(0)),
                 )
                 .child(
                     div()
                         .flex()
                         .gap_3()
-                        .children((0..3).map(|i| tile(i, TILES[i].0, TILES[i].1, TILES[i].2))),
+                        .child(text_cards.remove(0))
+                        .child(text_cards.remove(0))
+                        .child(text_cards.remove(0)),
                 )
                 .child(
+                    // Staggered activity bars — GPUI per-element animation at display rate.
                     div()
-                        .flex()
-                        .gap_3()
-                        .children((3..6).map(|i| tile(i, TILES[i].0, TILES[i].1, TILES[i].2))),
-                )
-                .child(
-                    div()
-                        .h(px(48.))
+                        .h(px(40.))
                         .rounded_lg()
                         .border_1()
                         .border_color(rgb(0xe4e4e7))
                         .bg(gpui::white())
-                        .shadow_card()
+                        .px_4()
                         .flex()
-                        .gap_2()
+                        .gap(px(4.))
                         .items_center()
-                        .justify_center()
-                        .children((0..7usize).map(|i| {
+                        .children((0..18usize).map(|i| {
                             div()
-                                .rounded_full()
-                                .bg(rgb(CHART_2))
+                                .w(px(6.))
+                                .rounded_sm()
+                                .bg(rgb(0x09090b))
                                 .with_animation(
-                                    ("dot", i),
-                                    Animation::new(Duration::from_millis(1400)).repeat(),
-                                    move |dot, delta| {
+                                    ("act", i),
+                                    Animation::new(Duration::from_millis(1200)).repeat(),
+                                    move |bar, delta| {
                                         let phase = delta * std::f32::consts::TAU;
-                                        let pulse = ((phase + i as f32 * 0.8).sin() * 0.5 + 0.5)
-                                            .powf(1.5);
-                                        dot.size(px(6. + 8. * pulse))
+                                        let h = 6.
+                                            + 18.
+                                                * ((phase + i as f32 * 0.55).sin() * 0.5 + 0.5)
+                                                    .powf(2.0);
+                                        bar.h(px(h))
                                     },
                                 )
                         })),
@@ -690,11 +782,10 @@ mod example {
         pane: Pane,
         with_search: Option<mpsc::Sender<String>>,
     ) -> (Retained<NSWindow>, gpui::WindowHandle<DemoApp>) {
-        // --- Plain AppKit: the window (plus, for the dashboard, a native
-        // search field layered above the GPUI surface). ---
+        // --- Plain AppKit: the window. ---
         // SAFETY: all objects are created and used on the main thread and are
         // kept alive for the lifetime of the process (`mem::forget` in `run`).
-        let (native_window, host_view) = unsafe {
+        let native_window = unsafe {
             let rect = NSRect::new(NSPoint::new(180., 160.), NSSize::new(WIDTH, HEIGHT));
             let style = NSWindowStyleMask::Titled
                 | NSWindowStyleMask::Closable
@@ -708,65 +799,32 @@ mod example {
                 false,
             );
             native_window.setTitle(&NSString::from_str(title));
-
-            let content_view = native_window
-                .contentView()
-                .expect("native window has a content view");
-            let content_bounds = content_view.bounds().size;
-
-            // The surface GPUI renders into: the whole content area. It
-            // autoresizes, so it follows the content view when the native tab
-            // bar appears.
-            let host_view = NSView::new(mtm);
-            host_view.setFrame(NSRect::new(
-                NSPoint::new(0., 0.),
-                NSSize::new(content_bounds.width, content_bounds.height),
-            ));
-            host_view.setAutoresizingMask(
-                objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
-                    | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            content_view.addSubview(&host_view);
-
-            if let Some(tx) = with_search {
-                // A native search field, layered above the GPUI surface in the
-                // pane's header row; pinned to the content view's top edge.
-                let search = NSSearchField::new(mtm);
-                search.setFrame(NSRect::new(
-                    NSPoint::new(
-                        content_bounds.width - 24. - 200.,
-                        content_bounds.height - 24. - 25.,
-                    ),
-                    NSSize::new(200., 26.),
-                ));
-                search.setAutoresizingMask(
-                    objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin
-                        | objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin,
-                );
-                search.setPlaceholderString(Some(&NSString::from_str("Filter metrics")));
-                let search_handler = SearchHandler::new(tx);
-                let _: () = msg_send![&*search, setDelegate: &*search_handler];
-                content_view.addSubview(&search);
-                // Both live for the rest of the process.
-                std::mem::forget((search, search_handler));
-            }
-
-            (native_window, host_view)
+            native_window
         };
 
-        // --- GPUI: render the pane into the host view. ---
-        let host_size = unsafe { NSView::bounds(&host_view) }.size;
-        let host_ptr = NonNull::new(Retained::as_ptr(&host_view) as *mut _)
-            .expect("host view pointer is non-null");
+        // Pass the window's contentView directly as the host.  open_window
+        // detects external_view == contentView and promotes the GPUI native
+        // view to be the contentView via setContentView:, giving it the same
+        // CA-transaction resize path as a regular GPUI window — no edge jitter.
+        let (content_ptr, content_bounds) = unsafe {
+            let cv = native_window
+                .contentView()
+                .expect("native window has a content view");
+            let bounds = cv.bounds().size;
+            let ptr = NonNull::new(Retained::as_ptr(&cv) as *mut _)
+                .expect("content view pointer is non-null");
+            (ptr, bounds)
+        };
+
         let gpui_window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
                         origin: point(px(0.), px(0.)),
-                        size: size(px(host_size.width as f32), px(host_size.height as f32)),
+                        size: size(px(content_bounds.width as f32), px(content_bounds.height as f32)),
                     })),
                     host_window_handle: Some(RawWindowHandle::AppKit(AppKitWindowHandle::new(
-                        host_ptr,
+                        content_ptr,
                     ))),
                     ..Default::default()
                 },
@@ -785,8 +843,37 @@ mod example {
             )
             .expect("failed to open hosted window");
 
-        // The host view lives for the rest of the process.
-        std::mem::forget(host_view);
+        // After open_window, the GPUI native view is the window's contentView.
+        // Add the native search field as a subview of it so it layers on top.
+        if let Some(tx) = with_search {
+            unsafe {
+                let gpui_view = native_window
+                    .contentView()
+                    .expect("contentView is now the GPUI native view");
+                let gpui_bounds = gpui_view.bounds().size;
+                // A native search field in the pane's header row; pinned to
+                // the top-right corner and follows resize via autoresizing.
+                let search = NSSearchField::new(mtm);
+                search.setFrame(NSRect::new(
+                    NSPoint::new(
+                        gpui_bounds.width - 24. - 200.,
+                        gpui_bounds.height - 24. - 25.,
+                    ),
+                    NSSize::new(200., 26.),
+                ));
+                search.setAutoresizingMask(
+                    objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin
+                        | objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin,
+                );
+                search.setPlaceholderString(Some(&NSString::from_str("Filter metrics")));
+                let search_handler = SearchHandler::new(tx);
+                let _: () = msg_send![&*search, setDelegate: &*search_handler];
+                gpui_view.addSubview(&search);
+                // Both live for the rest of the process.
+                std::mem::forget((search, search_handler));
+            }
+        }
+
         (native_window, gpui_window)
     }
 
@@ -796,6 +883,7 @@ mod example {
                 KeyBinding::new("cmd-1", SelectTab1, Some(APP_CONTEXT)),
                 KeyBinding::new("cmd-2", SelectTab2, Some(APP_CONTEXT)),
                 KeyBinding::new("enter", DismissInfo, Some(POPOVER_CONTEXT)),
+                KeyBinding::new("cmd-k", ToggleFeature, Some(POPOVER_CONTEXT)),
             ]);
             let mtm = MainThreadMarker::new().expect("must run on the main thread");
 

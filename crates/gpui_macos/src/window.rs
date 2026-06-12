@@ -515,6 +515,10 @@ struct MacWindowState {
     // (e.g. an NSPopover's internal window): we must not close that window, and
     // we receive none of its notifications.
     owns_native_window: bool,
+    // Temporarily set during set_frame_size so that content_size() returns the
+    // incoming new size while resize_callback runs (before super setFrameSize:
+    // has updated the NSView frame). Cleared immediately after the callback.
+    pending_content_size: Option<Size<Pixels>>,
 }
 
 impl MacWindowState {
@@ -645,6 +649,9 @@ impl MacWindowState {
     }
 
     fn content_size(&self) -> Size<Pixels> {
+        if let Some(pending) = self.pending_content_size {
+            return pending;
+        }
         if !self.owns_native_window {
             // Hosted views: the host window's content view isn't ours — use the
             // GPUI view's own bounds.
@@ -872,6 +879,7 @@ impl MacWindow {
                 accesskit_adapter: None,
                 sheet_parent: None,
                 owns_native_window: true,
+                pending_content_size: None,
             })));
 
             (*native_window).set_ivar(
@@ -1114,6 +1122,7 @@ impl MacWindow {
                 accesskit_adapter: None,
                 sheet_parent: None,
                 owns_native_window: false,
+                pending_content_size: None,
             })));
 
             (*native_view).set_ivar(
@@ -1129,7 +1138,19 @@ impl MacWindow {
                 setLayerContentsRedrawPolicy: NSViewLayerContentsRedrawDuringViewResize
             ];
 
-            NSView::addSubview_(external_view, native_view.autorelease());
+            // If the external view is the window's current content view, promote our
+            // GPUI view to be the content view directly. This puts setFrameSize: in
+            // the same CA-transaction path as a regular GPUI window, eliminating the
+            // sub-pixel edge jitter that occurs when rendering from a sub-view during
+            // live resize. When the external view is not the content view (e.g. inside
+            // an NSPopover's content view hierarchy), fall back to adding as a subview.
+            let window_content_view: id = msg_send![host_window, contentView];
+            let native_view_autorelease = native_view.autorelease();
+            if window_content_view == external_view {
+                let _: () = msg_send![host_window, setContentView: native_view_autorelease];
+            } else {
+                NSView::addSubview_(external_view, native_view_autorelease);
+            }
             let _: BOOL = msg_send![host_window, makeFirstResponder: native_view];
 
             window.0.lock().start_display_link();
@@ -2787,7 +2808,7 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
     }
 
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.as_ref().lock();
+    let lock = window_state.as_ref().lock();
 
     let new_size = convert(size);
     let old_size = unsafe {
@@ -2799,21 +2820,47 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
         return;
     }
 
-    unsafe {
-        let _: () = msg_send![super(this, class!(NSView)), setFrameSize: size];
-    }
+    drop(lock);
 
+    // Update the drawable size and GPUI viewport before the bounds change so
+    // that any displayLayer: call triggered during or after super finds the
+    // renderer and layout already consistent with the new size.
+    let mut lock = window_state.as_ref().lock();
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
 
     if let Some(mut callback) = lock.resize_callback.take() {
-        let content_size = lock.content_size();
-        let scale_factor = lock.scale_factor();
+        lock.pending_content_size = Some(new_size);
         drop(lock);
-        callback(content_size, scale_factor);
-        window_state.lock().resize_callback = Some(callback);
-    };
+        callback(new_size, scale_factor);
+        let mut lock = window_state.as_ref().lock();
+        lock.pending_content_size = None;
+        lock.resize_callback = Some(callback);
+        drop(lock);
+    } else {
+        drop(lock);
+    }
+
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSView)), setFrameSize: size];
+    }
+
+    // For hosted windows (external_view == contentView, i.e. the GPUI view is
+    // promoted to be the NSWindow's contentView), force a synchronous render
+    // immediately after the bounds change.  With presentsWithTransaction=true
+    // set inside display_layer, drawable.present() is deferred into the
+    // current CA transaction — the same one that just received the bounds
+    // change from super above — so both land at the same vsync with no
+    // blank-strip flash on expanding edges.
+    //
+    // This path is safe for all windows: for non-hosted windows the display
+    // link already handles rendering and the extra synchronous draw is a
+    // redundant but harmless fast-path.
+    unsafe {
+        let layer: id = msg_send![this, layer];
+        let _: () = msg_send![layer, display];
+    }
 }
 
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
