@@ -627,6 +627,12 @@ impl Platform for MacPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
+        if let Some(host) = options.host_window_handle {
+            anyhow::ensure!(
+                matches!(host, raw_window_handle::RawWindowHandle::AppKit(_)),
+                "host_window_handle on macOS must be an AppKit handle"
+            );
+        }
         let (cursor_visible, foreground_executor, background_executor, renderer_context) = {
             let guard = self.0.lock();
             (

@@ -27,7 +27,8 @@ use dispatch2::DispatchQueue;
 use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalPaths,
     FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    PlatformAtlas,
     PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
     PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams, point,
@@ -510,6 +511,14 @@ struct MacWindowState {
     accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<id>,
+    // False when the GPUI view is hosted inside an external window we don't own
+    // (e.g. an NSPopover's internal window): we must not close that window, and
+    // we receive none of its notifications.
+    owns_native_window: bool,
+    // Temporarily set during set_frame_size so that content_size() returns the
+    // incoming new size while resize_callback runs (before super setFrameSize:
+    // has updated the NSView frame). Cleared immediately after the callback.
+    pending_content_size: Option<Size<Pixels>>,
 }
 
 impl MacWindowState {
@@ -567,10 +576,17 @@ impl MacWindowState {
     fn start_display_link(&mut self) {
         self.stop_display_link();
         unsafe {
-            if !self
-                .native_window
-                .occlusionState()
-                .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
+            // Only honor the occlusion check for windows we own: we receive
+            // their occlusion notifications and restart the link when they
+            // become visible again. For views hosted in an external window
+            // (e.g. an NSPopover's internal window) we get no such
+            // notifications — and the host may not report itself visible right
+            // after being shown — so the link must keep running.
+            if self.owns_native_window
+                && !self
+                    .native_window
+                    .occlusionState()
+                    .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
             {
                 return;
             }
@@ -633,6 +649,16 @@ impl MacWindowState {
     }
 
     fn content_size(&self) -> Size<Pixels> {
+        if let Some(pending) = self.pending_content_size {
+            return pending;
+        }
+        if !self.owns_native_window {
+            // Hosted views: the host window's content view isn't ours — use the
+            // GPUI view's own bounds.
+            let NSSize { width, height, .. } =
+                unsafe { NSView::bounds(self.native_view.as_ptr()) }.size;
+            return size(px(width as f32), px(height as f32));
+        }
         let NSSize { width, height, .. } =
             unsafe { NSView::frame(self.native_window.contentView()) }.size;
         size(px(width as f32), px(height as f32))
@@ -678,6 +704,7 @@ impl MacWindow {
             display_id,
             window_min_size,
             tabbing_identifier,
+            host_window_handle,
             ..
         }: WindowParams,
         cursor_visible: Arc<AtomicBool>,
@@ -685,6 +712,18 @@ impl MacWindow {
         background_executor: BackgroundExecutor,
         renderer_context: renderer::Context,
     ) -> Self {
+        // Non-AppKit handles are rejected by `MacPlatform::open_window`.
+        if let Some(rwh::RawWindowHandle::AppKit(host)) = host_window_handle {
+            return Self::open_in_external_view(
+                handle,
+                host.ns_view.as_ptr() as id,
+                bounds,
+                cursor_visible,
+                foreground_executor,
+                background_executor,
+                renderer_context,
+            );
+        }
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
 
@@ -839,6 +878,8 @@ impl MacWindow {
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit_adapter: None,
                 sheet_parent: None,
+                owns_native_window: true,
+                pending_content_size: None,
             })));
 
             (*native_window).set_ivar(
@@ -1005,6 +1046,124 @@ impl MacWindow {
         }
     }
 
+    /// Open a window whose content is rendered by GPUI into an existing,
+    /// already-on-screen external `NSView` (e.g. the content view of a shown
+    /// `NSPopover`), instead of creating an `NSWindow` of our own. The GPUI view
+    /// is added as an autoresizing subview; rendering, input, and frame driving
+    /// all work as for a regular window. The caller owns the host view/window
+    /// lifecycle and must close this window when the host goes away.
+    fn open_in_external_view(
+        handle: AnyWindowHandle,
+        external_view: id,
+        bounds: Bounds<Pixels>,
+        cursor_visible: Arc<AtomicBool>,
+        foreground_executor: ForegroundExecutor,
+        background_executor: BackgroundExecutor,
+        renderer_context: renderer::Context,
+    ) -> Self {
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+
+            let host_window: id = msg_send![external_view, window];
+            assert!(
+                !host_window.is_null(),
+                "external view must already be installed in a window"
+            );
+
+            let native_view: id = msg_send![VIEW_CLASS, alloc];
+            let native_view =
+                NSView::initWithFrame_(native_view, NSView::bounds(external_view));
+            assert!(!native_view.is_null());
+
+            let window = Self(Arc::new(Mutex::new(MacWindowState {
+                handle,
+                foreground_executor,
+                background_executor,
+                native_window: host_window,
+                native_view: NonNull::new_unchecked(native_view),
+                blurred_view: None,
+                background_appearance: WindowBackgroundAppearance::Transparent,
+                cursor_style: CursorStyle::Arrow,
+                cursor_visible,
+                display_link: None,
+                renderer: renderer::new_renderer(
+                    renderer_context,
+                    host_window as *mut _,
+                    native_view as *mut _,
+                    bounds.size.map(|pixels| pixels.as_f32()),
+                    true,
+                ),
+                request_frame_callback: None,
+                event_callback: None,
+                activate_callback: None,
+                resize_callback: None,
+                moved_callback: None,
+                should_close_callback: None,
+                close_callback: None,
+                appearance_changed_callback: None,
+                input_handler: None,
+                last_key_equivalent: None,
+                synthetic_drag_counter: 0,
+                traffic_light_position: None,
+                transparent_titlebar: true,
+                previous_modifiers_changed_event: None,
+                keystroke_for_do_command: None,
+                do_command_handled: None,
+                external_files_dragged: false,
+                first_mouse: false,
+                fullscreen_restore_bounds: Bounds::default(),
+                move_tab_to_new_window_callback: None,
+                merge_all_windows_callback: None,
+                select_next_tab_callback: None,
+                select_previous_tab_callback: None,
+                toggle_tab_bar_callback: None,
+                activated_least_once: false,
+                closed: Arc::new(AtomicBool::new(false)),
+                accesskit_adapter: None,
+                sheet_parent: None,
+                owns_native_window: false,
+                pending_content_size: None,
+            })));
+
+            (*native_view).set_ivar(
+                WINDOW_STATE_IVAR,
+                Arc::into_raw(window.0.clone()) as *const c_void,
+            );
+
+            native_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable);
+            native_view.setWantsBestResolutionOpenGLSurface_(YES);
+            native_view.setWantsLayer(YES);
+            let _: () = msg_send![
+                native_view,
+                setLayerContentsRedrawPolicy: NSViewLayerContentsRedrawDuringViewResize
+            ];
+
+            // If the external view is the window's current content view, promote our
+            // GPUI view to be the content view directly. This puts setFrameSize: in
+            // the same CA-transaction path as a regular GPUI window, eliminating the
+            // sub-pixel edge jitter that occurs when rendering from a sub-view during
+            // live resize. When the external view is not the content view (e.g. inside
+            // an NSPopover's content view hierarchy), fall back to adding as a subview.
+            let window_content_view: id = msg_send![host_window, contentView];
+            let native_view_autorelease = native_view.autorelease();
+            if window_content_view == external_view {
+                let _: () = msg_send![host_window, setContentView: native_view_autorelease];
+            } else {
+                NSView::addSubview_(external_view, native_view_autorelease);
+            }
+            let _: BOOL = msg_send![host_window, makeFirstResponder: native_view];
+
+            window.0.lock().start_display_link();
+
+            // Align the layer's contentsScale and drawable size to the host
+            // window's backing scale.
+            update_window_scale_factor(&window.0);
+
+            pool.drain();
+            window
+        }
+    }
+
     pub fn active_window() -> Option<AnyWindowHandle> {
         unsafe {
             let app = NSApplication::sharedApplication(nil);
@@ -1074,20 +1233,30 @@ impl Drop for MacWindow {
         let mut this = self.0.lock();
         this.renderer.destroy();
         let window = this.native_window;
+        let owns_native_window = this.owns_native_window;
+        let native_view = this.native_view.as_ptr();
         let sheet_parent = this.sheet_parent.take();
         this.display_link.take();
-        unsafe {
-            this.native_window.setDelegate_(nil);
+        // An externally hosted view lives in a window we don't own — don't touch
+        // that window's delegate or close it; just detach our view.
+        if owns_native_window {
+            unsafe {
+                this.native_window.setDelegate_(nil);
+            }
         }
         this.input_handler.take();
         this.foreground_executor
             .spawn(async move {
                 unsafe {
-                    if let Some(parent) = sheet_parent {
-                        let _: () = msg_send![parent, endSheet: window];
+                    if owns_native_window {
+                        if let Some(parent) = sheet_parent {
+                            let _: () = msg_send![parent, endSheet: window];
+                        }
+                        window.close();
+                        window.autorelease();
+                    } else {
+                        let _: () = msg_send![native_view, removeFromSuperview];
                     }
-                    window.close();
-                    window.autorelease();
                 }
             })
             .detach();
@@ -1229,12 +1398,27 @@ impl PlatformWindow for MacWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        let position = unsafe {
-            self.0
-                .lock()
-                .native_window
-                .mouseLocationOutsideOfEventStream()
-        };
+        let lock = self.0.lock();
+        if !lock.owns_native_window {
+            // Hosted views: window coordinates -> view-local coordinates (the
+            // view can be inset anywhere within the host window).
+            let position = unsafe { lock.native_window.mouseLocationOutsideOfEventStream() };
+            let origin: NSPoint = unsafe {
+                msg_send![
+                    lock.native_view.as_ptr(),
+                    convertPoint: NSPoint::new(0., 0.)
+                    toView: nil
+                ]
+            };
+            let height =
+                px(unsafe { NSView::bounds(lock.native_view.as_ptr()) }.size.height as f32);
+            let mut position = convert_mouse_position(position, height);
+            position.x -= px(origin.x as f32);
+            position.y += px(origin.y as f32);
+            return position;
+        }
+        let position = unsafe { lock.native_window.mouseLocationOutsideOfEventStream() };
+        drop(lock);
         convert_mouse_position(position, self.content_size().height)
     }
 
@@ -1749,6 +1933,14 @@ impl PlatformWindow for MacWindow {
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
         let mut lock = self.0.lock();
 
+        // The accessibility adapter subclasses the NSWindow. A hosted view's
+        // window belongs to the host application (and may host several GPUI
+        // windows) — don't subclass it. Accessibility for hosted windows is
+        // future work.
+        if !lock.owns_native_window {
+            return;
+        }
+
         let activation_handler = A11yActivationHandler {
             callback: callbacks.activation,
         };
@@ -2154,6 +2346,102 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
 
     if let Some(mut event) = event {
+        // Hosted views only: event locations are window-relative, while GPUI
+        // positions are relative to its view. A regular window's view sits at
+        // the window origin, but a hosted view can be inset anywhere within an
+        // external window (e.g. an NSPopover's internal window insets the
+        // content for its arrow/chrome), so shift positions into view-local
+        // space: with the view's bottom-left corner at (ox, oy) in window
+        // coords, the correction is x -= ox, y += oy (y was already flipped
+        // against the view height).
+        if !lock.owns_native_window {
+            let origin: NSPoint = unsafe {
+                msg_send![
+                    lock.native_view.as_ptr(),
+                    convertPoint: NSPoint::new(0., 0.)
+                    toView: nil
+                ]
+            };
+            // Mouse events can carry locations in a different window's
+            // coordinate space than ours: a hosted view's window may be an
+            // attached child window (e.g. an NSPopover's), whose mouse-moved
+            // events flow through the parent window's event stream. Convert
+            // such locations into our window's space via screen coordinates and
+            // fold the difference into the correction. Zero for events that
+            // already belong to our window.
+            let mut delta = NSPoint::new(0., 0.);
+            {
+                let event_window: id = unsafe { msg_send![native_event, window] };
+                if event_window != lock.native_window {
+                    unsafe {
+                        let raw = native_event.locationInWindow();
+                        let screen: NSPoint = if event_window.is_null() {
+                            raw
+                        } else {
+                            msg_send![event_window, convertPointToScreen: raw]
+                        };
+                        let local: NSPoint =
+                            msg_send![lock.native_window, convertPointFromScreen: screen];
+                        delta = NSPoint::new(local.x - raw.x, local.y - raw.y);
+                    }
+                }
+            }
+            let dx = px((origin.x - delta.x) as f32);
+            let dy = px((origin.y - delta.y) as f32);
+            match &mut event {
+                PlatformInput::MouseDown(e) => {
+                    e.position.x -= dx;
+                    e.position.y += dy;
+                }
+                PlatformInput::MouseUp(e) => {
+                    e.position.x -= dx;
+                    e.position.y += dy;
+                }
+                PlatformInput::MouseMove(e) => {
+                    e.position.x -= dx;
+                    e.position.y += dy;
+                }
+                PlatformInput::MouseExited(e) => {
+                    e.position.x -= dx;
+                    e.position.y += dy;
+                }
+                PlatformInput::ScrollWheel(e) => {
+                    e.position.x -= dx;
+                    e.position.y += dy;
+                }
+                PlatformInput::Pinch(e) => {
+                    e.position.x -= dx;
+                    e.position.y += dy;
+                }
+                PlatformInput::MousePressure(e) => {
+                    e.position.x -= dx;
+                    e.position.y += dy;
+                }
+                _ => {}
+            }
+
+            // A hover move over the host window's chrome (outside the view)
+            // would otherwise leave a stale hover state — there is no tracking
+            // area to deliver mouse-exited. Convert it.
+            if let PlatformInput::MouseMove(e) = &event
+                && e.pressed_button.is_none()
+            {
+                let bounds = unsafe { NSView::bounds(lock.native_view.as_ptr()) };
+                let (width, height) = (px(bounds.size.width as f32), px(bounds.size.height as f32));
+                if e.position.x < px(0.)
+                    || e.position.y < px(0.)
+                    || e.position.x > width
+                    || e.position.y > height
+                {
+                    event = PlatformInput::MouseExited(MouseExitEvent {
+                        position: e.position,
+                        pressed_button: None,
+                        modifiers: e.modifiers,
+                    });
+                }
+            }
+        }
+
         // AppKit unhides the cursor on the next mouse movement; mirror that here.
         if matches!(
             event,
@@ -2520,7 +2808,7 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
     }
 
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.as_ref().lock();
+    let lock = window_state.as_ref().lock();
 
     let new_size = convert(size);
     let old_size = unsafe {
@@ -2532,21 +2820,47 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
         return;
     }
 
-    unsafe {
-        let _: () = msg_send![super(this, class!(NSView)), setFrameSize: size];
-    }
+    drop(lock);
 
+    // Update the drawable size and GPUI viewport before the bounds change so
+    // that any displayLayer: call triggered during or after super finds the
+    // renderer and layout already consistent with the new size.
+    let mut lock = window_state.as_ref().lock();
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
 
     if let Some(mut callback) = lock.resize_callback.take() {
-        let content_size = lock.content_size();
-        let scale_factor = lock.scale_factor();
+        lock.pending_content_size = Some(new_size);
         drop(lock);
-        callback(content_size, scale_factor);
-        window_state.lock().resize_callback = Some(callback);
-    };
+        callback(new_size, scale_factor);
+        let mut lock = window_state.as_ref().lock();
+        lock.pending_content_size = None;
+        lock.resize_callback = Some(callback);
+        drop(lock);
+    } else {
+        drop(lock);
+    }
+
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSView)), setFrameSize: size];
+    }
+
+    // For hosted windows (external_view == contentView, i.e. the GPUI view is
+    // promoted to be the NSWindow's contentView), force a synchronous render
+    // immediately after the bounds change.  With presentsWithTransaction=true
+    // set inside display_layer, drawable.present() is deferred into the
+    // current CA transaction — the same one that just received the bounds
+    // change from super above — so both land at the same vsync with no
+    // blank-strip flash on expanding edges.
+    //
+    // This path is safe for all windows: for non-hosted windows the display
+    // link already handles rendering and the extra synchronous draw is a
+    // redundant but harmless fast-path.
+    unsafe {
+        let layer: id = msg_send![this, layer];
+        let _: () = msg_send![layer, display];
+    }
 }
 
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {

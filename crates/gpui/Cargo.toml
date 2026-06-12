@@ -164,7 +164,24 @@ unicode-segmentation = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 http_client = { workspace = true, features = ["test-support"] }
+raw-window-handle = "0.6"
 reqwest_client = { workspace = true, features = ["test-support"] }
+
+# For the hosted_popover / hosted_window examples, which build native AppKit
+# hosts (NSPopover, NSWindow) for GPUI windows.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+objc2-app-kit = { workspace = true, features = [
+    "NSControl",
+    "NSPopover",
+    "NSResponder",
+    "NSSearchField",
+    "NSTextField",
+    "NSView",
+    "NSViewController",
+    "NSWindow",
+] }
+objc2-foundation = { workspace = true }
 
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 wasm-bindgen = { workspace = true }
@@ -185,6 +202,10 @@ cbindgen = { version = "0.28.0", default-features = false }
 [[example]]
 name = "hello_world"
 path = "examples/hello_world.rs"
+
+[[example]]
+name = "hosted_window"
+path = "examples/hosted_window.rs"
 
 [[example]]
 name = "move_entity_between_windows"
