@@ -8121,7 +8121,7 @@ impl Workspace {
             .flex()
             .overflow_hidden()
             .flex_none()
-            .child(dock.clone())
+            .child(dock.clone().retained())
             .children(leader_border);
 
         // Apply sizing only when the dock is open. When closed the dock is still
