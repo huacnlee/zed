@@ -44,6 +44,10 @@ profiler = []
 path = "src/gpui.rs"
 doctest = false
 
+[[bench]]
+name = "small_updates"
+harness = false
+
 [dependencies]
 accesskit.workspace = true
 anyhow.workspace = true
@@ -147,7 +151,7 @@ windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Powe
 backtrace.workspace = true
 collections = { workspace = true, features = ["test-support"] }
 env_logger.workspace = true
-gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { workspace = true, features = ["font-kit", "test-support", "wayland", "x11"] }
 gpui_util = { workspace = true }
 lyon = { version = "1.0", features = ["extra"] }
 rand.workspace = true

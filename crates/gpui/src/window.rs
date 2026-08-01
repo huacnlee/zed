@@ -1288,6 +1288,14 @@ pub(crate) enum DrawPhase {
     Focus,
 }
 
+#[derive(Default)]
+struct DrawPhaseTimings {
+    prepaint: Duration,
+    request_layout: Duration,
+    layout: Duration,
+    paint: Duration,
+}
+
 #[derive(Default, Debug)]
 struct PendingInput {
     keystrokes: SmallVec<[Keystroke; 1]>,
@@ -2854,9 +2862,11 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
-        if !cx.mode.skip_drawing() {
-            self.draw_roots(cx);
-        }
+        let phase_timings = if !cx.mode.skip_drawing() {
+            self.draw_roots(cx)
+        } else {
+            DrawPhaseTimings::default()
+        };
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
 
@@ -2940,6 +2950,10 @@ impl Window {
                 invalidations: frame_dirty.invalidations,
                 draw_start,
                 draw_end: Instant::now(),
+                prepaint_duration: phase_timings.prepaint,
+                request_layout_duration: phase_timings.request_layout,
+                layout_duration: phase_timings.layout,
+                paint_duration: phase_timings.paint,
             });
         }
 
@@ -2997,7 +3011,8 @@ impl Window {
         self.input_latency_tracker.snapshot()
     }
 
-    fn draw_roots(&mut self, cx: &mut App) {
+    fn draw_roots(&mut self, cx: &mut App) -> DrawPhaseTimings {
+        let prepaint_started_at = profiler::frame_trace_enabled().then(Instant::now);
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
 
@@ -3034,7 +3049,10 @@ impl Window {
             .as_mut()
             .unwrap()
             .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
-        root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+        let layout_started_at = prepaint_started_at.map(|_| Instant::now());
+        root_element.layout_as_root(root_size.into(), self, cx);
+        let root_prepaint_started_at = layout_started_at.map(|_| Instant::now());
+        root_element.prepaint_at(Point::default(), self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
@@ -3065,6 +3083,7 @@ impl Window {
         }
 
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        let paint_started_at = prepaint_started_at.map(|_| Instant::now());
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
@@ -3111,6 +3130,26 @@ impl Window {
                 );
                 self.platform_window.a11y_tree_update(tree_update);
             }
+        }
+
+        match (
+            prepaint_started_at,
+            layout_started_at,
+            root_prepaint_started_at,
+            paint_started_at,
+        ) {
+            (
+                Some(prepaint_started_at),
+                Some(layout_started_at),
+                Some(root_prepaint_started_at),
+                Some(paint_started_at),
+            ) => DrawPhaseTimings {
+                prepaint: paint_started_at.duration_since(prepaint_started_at),
+                request_layout: layout_started_at.duration_since(prepaint_started_at),
+                layout: root_prepaint_started_at.duration_since(layout_started_at),
+                paint: Instant::now().duration_since(paint_started_at),
+            },
+            _ => DrawPhaseTimings::default(),
         }
     }
 
