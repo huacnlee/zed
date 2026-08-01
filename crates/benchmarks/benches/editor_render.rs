@@ -1,6 +1,7 @@
 use editor::{
     Editor, EditorMode, MultiBuffer,
     actions::{DeleteToPreviousWordStart, SelectAll, SplitSelectionIntoLines},
+    scroll::ScrollAmount,
 };
 use gpui::{
     AppContext as _, BenchAppContext, Context, Entity, Focusable as _, IntoElement, Render,
@@ -129,6 +130,15 @@ fn editor_render(cx: &mut BenchAppContext) {
 
 #[gpui::bench]
 fn editor_noop_notify(cx: &mut BenchAppContext) {
+    benchmark_editor_update(false, cx);
+}
+
+#[gpui::bench]
+fn editor_scroll(cx: &mut BenchAppContext) {
+    benchmark_editor_update(true, cx);
+}
+
+fn benchmark_editor_update(scroll_editor: bool, cx: &mut BenchAppContext) {
     init_context(cx);
 
     let text = "fn main() { println!(\"hello\"); }\n".repeat(1_000);
@@ -145,20 +155,42 @@ fn editor_noop_notify(cx: &mut BenchAppContext) {
         editor
     });
 
-    cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
+    if scroll_editor {
+        let mut amount = 1.;
+        cx.bench_renderer(editor, move |editor, window, cx| {
+            editor.scroll_screen(&ScrollAmount::Line(amount), window, cx);
+            amount = -amount;
+        });
+    } else {
+        cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
+    }
 }
 
 #[gpui::bench]
 fn editor_noop_notify_with_static_sibling(cx: &mut BenchAppContext) {
-    benchmark_editor_with_static_sibling(false, cx);
+    benchmark_editor_with_static_sibling(false, false, cx);
 }
 
 #[gpui::bench]
 fn editor_noop_notify_with_retained_static_sibling(cx: &mut BenchAppContext) {
-    benchmark_editor_with_static_sibling(true, cx);
+    benchmark_editor_with_static_sibling(true, false, cx);
 }
 
-fn benchmark_editor_with_static_sibling(retain_static_sibling: bool, cx: &mut BenchAppContext) {
+#[gpui::bench]
+fn editor_scroll_with_static_sibling(cx: &mut BenchAppContext) {
+    benchmark_editor_with_static_sibling(false, true, cx);
+}
+
+#[gpui::bench]
+fn editor_scroll_with_retained_static_sibling(cx: &mut BenchAppContext) {
+    benchmark_editor_with_static_sibling(true, true, cx);
+}
+
+fn benchmark_editor_with_static_sibling(
+    retain_static_sibling: bool,
+    scroll_editor: bool,
+    cx: &mut BenchAppContext,
+) {
     init_context(cx);
 
     let text = "fn main() { println!(\"hello\"); }\n".repeat(1_000);
@@ -184,7 +216,15 @@ fn benchmark_editor_with_static_sibling(retain_static_sibling: bool, cx: &mut Be
         editor
     });
 
-    cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
+    if scroll_editor {
+        let mut amount = 1.;
+        cx.bench_renderer(editor, move |editor, window, cx| {
+            editor.scroll_screen(&ScrollAmount::Line(amount), window, cx);
+            amount = -amount;
+        });
+    } else {
+        cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
+    }
 }
 
 struct EditorWithStaticSibling {
@@ -250,7 +290,10 @@ gpui::bench_group!(
     open_editor_with_one_long_line,
     editor_render,
     editor_noop_notify,
+    editor_scroll,
     editor_noop_notify_with_static_sibling,
-    editor_noop_notify_with_retained_static_sibling
+    editor_noop_notify_with_retained_static_sibling,
+    editor_scroll_with_static_sibling,
+    editor_scroll_with_retained_static_sibling
 );
 gpui::bench_main!(benches);
