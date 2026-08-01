@@ -1,7 +1,8 @@
 use gpui::{
     BenchAppContext, Context, Entity, IntoElement, Render, SharedString, StyleRefinement, Window,
-    div, prelude::*, px, rgb,
+    div, prelude::*, px, retained, rgb,
 };
+use std::sync::Arc;
 
 #[gpui::bench(inputs = row_counts(), group = "Blink cursor in root", input_name = "rows")]
 fn blink_cursor_in_root(row_count: &usize, cx: &mut BenchAppContext) {
@@ -13,6 +14,48 @@ fn blink_cursor_in_root(row_count: &usize, cx: &mut BenchAppContext) {
         })
     });
     cx.bench_renderer(view, |view, _window, cx| {
+        view.cursor_visible = !view.cursor_visible;
+        cx.notify();
+    });
+}
+
+#[gpui::bench(inputs = row_counts(), group = "Blink cursor with retained rows in root", input_name = "rows")]
+fn blink_cursor_with_retained_rows_in_root(row_count: &usize, cx: &mut BenchAppContext) {
+    let mut window = cx.add_empty_window();
+    let rows: Arc<[SharedString]> = bench_rows(*row_count).into();
+    let rows_height = px(*row_count as f32 * 24.);
+    let view = window.update(|window, cx| {
+        window.replace_root(cx, |_window, _cx| RootWithRetainedRows {
+            rows,
+            rows_height,
+            rows_version: 0,
+            cursor_visible: true,
+        })
+    });
+    cx.bench_renderer(view, |view, _window, cx| {
+        view.cursor_visible = !view.cursor_visible;
+        cx.notify();
+    });
+}
+
+#[gpui::bench(inputs = row_counts(), group = "Blink cursor with invalidated retained rows in root", input_name = "rows")]
+fn blink_cursor_with_invalidated_retained_rows_in_root(
+    row_count: &usize,
+    cx: &mut BenchAppContext,
+) {
+    let mut window = cx.add_empty_window();
+    let rows: Arc<[SharedString]> = bench_rows(*row_count).into();
+    let rows_height = px(*row_count as f32 * 24.);
+    let view = window.update(|window, cx| {
+        window.replace_root(cx, |_window, _cx| RootWithRetainedRows {
+            rows,
+            rows_height,
+            rows_version: 0,
+            cursor_visible: true,
+        })
+    });
+    cx.bench_renderer(view, |view, _window, cx| {
+        view.rows_version = view.rows_version.wrapping_add(1);
         view.cursor_visible = !view.cursor_visible;
         cx.notify();
     });
@@ -175,6 +218,37 @@ impl Render for CursorView {
 struct RootView {
     rows: Vec<SharedString>,
     cursor_visible: bool,
+}
+
+struct RootWithRetainedRows {
+    rows: Arc<[SharedString]>,
+    rows_height: gpui::Pixels,
+    rows_version: u64,
+    cursor_visible: bool,
+}
+
+impl Render for RootWithRetainedRows {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.rows.clone();
+        let rows_height = self.rows_height;
+        let cursor_visible = self.cursor_visible;
+        div()
+            .size_full()
+            .flex_col()
+            .child(retained("rows", self.rows_version, move || {
+                div()
+                    .w_full()
+                    .h(rows_height)
+                    .flex_col()
+                    .children(rows.iter().map(|row| div().h(px(24.)).child(row.clone())))
+            }))
+            .child(
+                div()
+                    .w(px(2.))
+                    .h(px(20.))
+                    .when(cursor_visible, |cursor| cursor.bg(rgb(0x000000))),
+            )
+    }
 }
 
 impl Render for RootView {
@@ -344,6 +418,8 @@ impl Render for CachedRowsWithCursor {
 gpui::bench_group!(
     benches,
     blink_cursor_in_root,
+    blink_cursor_with_retained_rows_in_root,
+    blink_cursor_with_invalidated_retained_rows_in_root,
     blink_cursor_in_leaf,
     blink_cursor_beside_rows_entity,
     blink_cursor_beside_cached_rows,
