@@ -1021,14 +1021,14 @@ impl EditorElement {
         let cursor_layouts = self.editor.update(cx, |editor, cx| {
             let mut cursors = Vec::new();
 
-            let show_local_cursors = editor.show_local_cursors(window, cx);
+            let layout_local_cursors = editor.layout_local_cursors(window);
 
             for (player_color, selections) in selections {
                 for selection in selections {
                     let cursor_position = selection.head;
 
                     let in_range = visible_display_row_range.contains(&cursor_position.row());
-                    if (selection.is_local && !show_local_cursors)
+                    if (selection.is_local && !layout_local_cursors)
                         || !in_range
                         || row_block_types.get(&cursor_position.row()) == Some(&true)
                     {
@@ -1161,6 +1161,7 @@ impl EditorElement {
                         shape: selection.cursor_shape,
                         block_text,
                         cursor_name: None,
+                        is_local: selection.is_local,
                     };
                     let cursor_name = selection.user_name.clone().map(|name| CursorName {
                         string: name,
@@ -5754,9 +5755,30 @@ impl EditorElement {
     }
 
     fn paint_cursors(&mut self, layout: &mut EditorLayout, window: &mut Window, cx: &mut App) {
-        for cursor in &mut layout.visible_cursors {
+        for cursor in layout
+            .visible_cursors
+            .iter_mut()
+            .filter(|cursor| !cursor.is_local)
+        {
             cursor.paint(layout.content_origin, window, cx);
         }
+
+        let (group, visible) = {
+            let editor = self.editor.read(cx);
+            (
+                editor.cursor_paint_group,
+                editor.show_local_cursors(window, cx),
+            )
+        };
+        window.paint_group(group, visible, |window| {
+            for cursor in layout
+                .visible_cursors
+                .iter_mut()
+                .filter(|cursor| cursor.is_local)
+            {
+                cursor.paint(layout.content_origin, window, cx);
+            }
+        });
     }
 
     fn paint_scrollbars(&mut self, layout: &mut EditorLayout, window: &mut Window, cx: &mut App) {
@@ -10348,6 +10370,7 @@ pub struct CursorLayout {
     shape: CursorShape,
     block_text: Option<ShapedLine>,
     cursor_name: Option<AnyElement>,
+    is_local: bool,
 }
 
 #[derive(Debug)]
@@ -10374,6 +10397,7 @@ impl CursorLayout {
             shape,
             block_text,
             cursor_name: None,
+            is_local: false,
         }
     }
 

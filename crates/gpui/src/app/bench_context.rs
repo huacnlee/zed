@@ -11,9 +11,9 @@ use hdrhistogram::Histogram;
 
 use crate::{
     AnyView, AnyWindowHandle, App, AppCell, AppContext, BackgroundExecutor, BenchDispatcher,
-    Bounds, Context, Empty, Entity, EntityId, Focusable, ForegroundExecutor, Global, Platform,
-    PlatformHeadlessRenderer, PlatformTextSystem, Render, Reservation, Task, TestPlatform,
-    VisualContext, Window, WindowBounds, WindowHandle, WindowOptions,
+    Bounds, Context, Empty, Entity, EntityId, Focusable, ForegroundExecutor, Global, PaintGroupId,
+    Platform, PlatformHeadlessRenderer, PlatformTextSystem, Render, Reservation, Task,
+    TestPlatform, VisualContext, Window, WindowBounds, WindowHandle, WindowOptions,
     app::GpuiBorrow,
     profiler::{self, FrameTiming, FrameTimingCollector},
 };
@@ -437,6 +437,52 @@ impl<'a, 'measurement> BenchAppContext<'a, 'measurement> {
                 .iter()
                 .filter(|timing| timing.window_id == window_id),
         );
+        self.replace_bencher(bencher);
+    }
+
+    /// Measures submission of a view's current scene without rebuilding it.
+    pub fn bench_presenter<V>(&mut self, view: Entity<V>)
+    where
+        V: 'static + Render,
+    {
+        let bencher = self.take_bencher("bench_presenter");
+        let dispatcher = self.background_executor.dispatcher().clone();
+
+        let mut benchmark = || {
+            dispatcher
+                .as_bench()
+                .expect("validated in BenchAppContext::build")
+                .run_ready_main_tasks();
+            self.with_window(view.entity_id(), |window, _| {
+                window.present_current_frame();
+            })
+            .expect("cannot benchmark presenter for entity without a current window");
+        };
+        bencher.iter(&mut benchmark);
+        self.replace_bencher(bencher);
+    }
+
+    /// Measures changing a retained paint group's visibility and presenting it.
+    pub fn bench_paint_group_visibility<V>(&mut self, view: Entity<V>, group: PaintGroupId)
+    where
+        V: 'static + Render,
+    {
+        let bencher = self.take_bencher("bench_paint_group_visibility");
+        let dispatcher = self.background_executor.dispatcher().clone();
+        let mut visible = true;
+
+        let mut benchmark = || {
+            dispatcher
+                .as_bench()
+                .expect("validated in BenchAppContext::build")
+                .run_ready_main_tasks();
+            visible = !visible;
+            self.with_window(view.entity_id(), |window, _| {
+                assert!(window.set_paint_group_visibility(group, visible));
+            })
+            .expect("cannot benchmark paint group for entity without a current window");
+        };
+        bencher.iter(&mut benchmark);
         self.replace_bencher(bencher);
     }
 

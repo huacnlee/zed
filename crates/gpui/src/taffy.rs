@@ -33,6 +33,12 @@ struct NodeContext {
 }
 pub struct TaffyLayoutEngine {
     taffy: TaffyTree<NodeContext>,
+    roots: Vec<LayoutId>,
+    new_nodes: Vec<LayoutId>,
+    reused_nodes: FxHashSet<LayoutId>,
+    auto_stretched_nodes: FxHashMap<LayoutId, (bool, bool)>,
+    generation: u64,
+    frame_started: bool,
     absolute_layout_bounds: FxHashMap<LayoutId, Bounds<Pixels>>,
     /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
@@ -48,6 +54,12 @@ impl TaffyLayoutEngine {
         taffy.disable_rounding();
         TaffyLayoutEngine {
             taffy,
+            roots: Vec::new(),
+            new_nodes: Vec::new(),
+            reused_nodes: FxHashSet::default(),
+            auto_stretched_nodes: FxHashMap::default(),
+            generation: 0,
+            frame_started: false,
             absolute_layout_bounds: FxHashMap::default(),
             absolute_outer_origins: FxHashMap::default(),
             computed_layouts: FxHashSet::default(),
@@ -55,11 +67,47 @@ impl TaffyLayoutEngine {
         }
     }
 
-    pub fn clear(&mut self) {
-        self.taffy.clear();
+    pub fn finish_frame(&mut self) {
+        if self.frame_started {
+            if !self.roots.is_empty() && self.reused_nodes.is_empty() {
+                // Replacing the tree is cheaper than removing a fully stale tree node by node.
+                let mut taffy = TaffyTree::new();
+                taffy.disable_rounding();
+                self.taffy = taffy;
+                self.roots.clear();
+                self.auto_stretched_nodes.clear();
+                self.generation = self.generation.wrapping_add(1);
+            } else {
+                for layout_id in std::mem::take(&mut self.roots) {
+                    if !self.reused_nodes.contains(&layout_id) {
+                        self.remove_subtree(layout_id);
+                    }
+                }
+                self.roots.extend(
+                    self.new_nodes
+                        .iter()
+                        .chain(&self.reused_nodes)
+                        .copied()
+                        .filter(|layout_id| self.taffy.parent(layout_id.0).is_none()),
+                );
+            }
+        }
+        self.new_nodes.clear();
+        self.reused_nodes.clear();
+        self.frame_started = false;
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();
         self.computed_layouts.clear();
+    }
+
+    pub fn reuse_layout(&mut self, id: LayoutId) {
+        self.start_frame();
+        self.reused_nodes.insert(id);
+        if let Some(parent) = self.taffy.parent(id.0) {
+            // Taffy's new_with_children updates the child's parent pointer without removing it
+            // from its previous parent's child list.
+            self.taffy.remove_child(parent, id.0).expect(EXPECT_MESSAGE);
+        }
     }
 
     pub fn request_layout(
@@ -69,9 +117,10 @@ impl TaffyLayoutEngine {
         scale_factor: f32,
         children: &[LayoutId],
     ) -> LayoutId {
+        self.start_frame();
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        if children.is_empty() {
+        let layout_id = if children.is_empty() {
             self.taffy
                 .new_leaf(taffy_style)
                 .expect(EXPECT_MESSAGE)
@@ -82,7 +131,9 @@ impl TaffyLayoutEngine {
                 .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
                 .expect(EXPECT_MESSAGE)
                 .into()
-        }
+        };
+        self.new_nodes.push(layout_id);
+        layout_id
     }
 
     pub fn request_measured_layout(
@@ -98,9 +149,11 @@ impl TaffyLayoutEngine {
         ) -> Size<Pixels>
         + 'static,
     ) -> LayoutId {
+        self.start_frame();
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        self.taffy
+        let layout_id = self
+            .taffy
             .new_leaf_with_context(
                 taffy_style,
                 NodeContext {
@@ -108,7 +161,47 @@ impl TaffyLayoutEngine {
                 },
             )
             .expect(EXPECT_MESSAGE)
-            .into()
+            .into();
+        self.new_nodes.push(layout_id);
+        layout_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[cfg(test)]
+    pub fn node_count(&self) -> usize {
+        self.taffy.total_node_count()
+    }
+
+    fn start_frame(&mut self) {
+        self.frame_started = true;
+    }
+
+    fn remove_subtree(&mut self, layout_id: LayoutId) {
+        let mut pending = vec![(layout_id, false)];
+        while let Some((layout_id, visited)) = pending.pop() {
+            if !visited {
+                pending.push((layout_id, true));
+                pending.extend(
+                    self.taffy
+                        .children(layout_id.0)
+                        .expect(EXPECT_MESSAGE)
+                        .into_iter()
+                        .map(|child| (child.into(), false)),
+                );
+                continue;
+            }
+            if self.taffy.get_node_context(layout_id.0).is_some() {
+                // TaffyTree::remove does not remove entries from its node-context map.
+                self.taffy
+                    .set_node_context(layout_id.0, None)
+                    .expect(EXPECT_MESSAGE);
+            }
+            self.taffy.remove(layout_id.0).expect(EXPECT_MESSAGE);
+            self.auto_stretched_nodes.remove(&layout_id);
+        }
     }
 
     /// Treats any `auto` dimension of the given node's style as filling `size`.
@@ -123,13 +216,15 @@ impl TaffyLayoutEngine {
         size: Size<Pixels>,
         scale_factor: f32,
     ) {
-        let style = self.taffy.style(id.0).expect(EXPECT_MESSAGE);
-        let stretch_width = style.size.width.is_auto();
-        let stretch_height = style.size.height.is_auto();
+        let (stretch_width, stretch_height) =
+            *self.auto_stretched_nodes.entry(id).or_insert_with(|| {
+                let style = self.taffy.style(id.0).expect(EXPECT_MESSAGE);
+                (style.size.width.is_auto(), style.size.height.is_auto())
+            });
         if !stretch_width && !stretch_height {
             return;
         }
-        let mut style = style.clone();
+        let mut style = self.taffy.style(id.0).expect(EXPECT_MESSAGE).clone();
         if stretch_width {
             style.size.width =
                 taffy::style::Dimension::length(round_to_device_pixel(size.width.0, scale_factor));

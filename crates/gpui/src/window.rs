@@ -8,10 +8,10 @@ use crate::{
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
     KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintGroupId, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
@@ -2875,7 +2875,7 @@ impl Window {
             self.platform_window.set_input_handler(input_handler);
         }
 
-        self.layout_engine.as_mut().unwrap().clear();
+        self.layout_engine.as_mut().unwrap().finish_frame();
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
@@ -2989,6 +2989,12 @@ impl Window {
         if self.needs_present.get() {
             self.present();
         }
+    }
+
+    #[cfg(feature = "bench")]
+    /// Presents the current scene even when no new frame was drawn.
+    pub fn present_current_frame(&mut self) {
+        self.present();
     }
 
     /// Returns a snapshot of the current input-latency histograms.
@@ -3884,6 +3890,36 @@ impl Window {
         result
     }
 
+    /// Paints primitives as a group whose visibility can be changed independently.
+    pub fn paint_group<R>(
+        &mut self,
+        id: PaintGroupId,
+        visible: bool,
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.scene.push_paint_group(id, visible);
+        let result = paint(self);
+        self.next_frame.scene.pop_paint_group();
+        result
+    }
+
+    /// Changes a retained paint group's visibility, presents it immediately when changed, and
+    /// returns whether the group exists.
+    pub fn set_paint_group_visibility(&mut self, id: PaintGroupId, visible: bool) -> bool {
+        let Some(changed) = self
+            .rendered_frame
+            .scene
+            .set_paint_group_visibility(id, visible)
+        else {
+            return false;
+        };
+        if changed {
+            self.present();
+        }
+        true
+    }
+
     /// Paint the drop (non-inset) shadows from `shadows` into the scene at the current
     /// z-index. Inset shadows are skipped; paint those with [`Self::paint_inset_shadows`]
     /// after the element's background so they layer on top of the fill.
@@ -4579,6 +4615,24 @@ impl Window {
             .as_mut()
             .unwrap()
             .request_measured_layout(style, rem_size, scale_factor, measure)
+    }
+
+    pub(crate) fn reuse_layout(&mut self, layout_id: LayoutId) {
+        self.invalidator.debug_assert_prepaint();
+        self.layout_engine.as_mut().unwrap().reuse_layout(layout_id);
+    }
+
+    pub(crate) fn layout_generation(&self) -> u64 {
+        self.layout_engine.as_ref().unwrap().generation()
+    }
+
+    pub(crate) fn image_cache_id(&self) -> Option<EntityId> {
+        self.image_cache_stack.last().map(AnyImageCache::entity_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn layout_node_count(&self) -> usize {
+        self.layout_engine.as_ref().unwrap().node_count()
     }
 
     /// Compute the layout for the given id within the given available space.

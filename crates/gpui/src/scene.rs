@@ -13,6 +13,7 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -21,6 +22,24 @@ pub type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 
 #[expect(missing_docs)]
 pub type DrawOrder = u32;
+
+/// Identifies a group of scene primitives whose visibility can change without rebuilding UI elements.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PaintGroupId(u64);
+
+impl PaintGroupId {
+    /// Creates a unique paint group identifier.
+    pub fn new() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Default for PaintGroupId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// A boolean stored as a `u32` so that GPU-facing structs contain no
 /// compiler-inserted padding bytes, which would be undefined behavior to
@@ -42,6 +61,7 @@ pub struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
+    paint_group_visibility: Vec<bool>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
@@ -58,6 +78,7 @@ impl Scene {
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
+        self.paint_group_visibility.clear();
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
@@ -84,6 +105,19 @@ impl Scene {
         self.paint_operations.push(PaintOperation::EndLayer);
     }
 
+    pub(crate) fn push_paint_group(&mut self, id: PaintGroupId, visible: bool) {
+        self.paint_group_visibility.push(visible);
+        self.paint_operations
+            .push(PaintOperation::StartPaintGroup { id, visible });
+    }
+
+    pub(crate) fn pop_paint_group(&mut self) {
+        self.paint_group_visibility
+            .pop()
+            .expect("unbalanced paint group");
+        self.paint_operations.push(PaintOperation::EndPaintGroup);
+    }
+
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
         let clipped_bounds = primitive
@@ -99,43 +133,42 @@ impl Scene {
             .last()
             .copied()
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
-        match &mut primitive {
+        primitive.set_order(order);
+        if self.paint_group_visibility.iter().all(|visible| *visible) {
+            self.push_primitive(&mut primitive);
+        }
+        self.paint_operations
+            .push(PaintOperation::Primitive(primitive));
+    }
+
+    fn push_primitive(&mut self, primitive: &mut Primitive) {
+        match primitive {
             Primitive::Shadow(shadow) => {
-                shadow.order = order;
                 self.shadows.push(*shadow);
             }
             Primitive::Quad(quad) => {
-                quad.order = order;
                 self.quads.push(*quad);
             }
             Primitive::Path(path) => {
-                path.order = order;
                 path.id = PathId(self.paths.len());
                 self.paths.push(path.clone());
             }
             Primitive::Underline(underline) => {
-                underline.order = order;
                 self.underlines.push(*underline);
             }
             Primitive::MonochromeSprite(sprite) => {
-                sprite.order = order;
                 self.monochrome_sprites.push(*sprite);
             }
             Primitive::SubpixelSprite(sprite) => {
-                sprite.order = order;
                 self.subpixel_sprites.push(*sprite);
             }
             Primitive::PolychromeSprite(sprite) => {
-                sprite.order = order;
                 self.polychrome_sprites.push(*sprite);
             }
             Primitive::Surface(surface) => {
-                surface.order = order;
                 self.surfaces.push(surface.clone());
             }
         }
-        self.paint_operations
-            .push(PaintOperation::Primitive(primitive));
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
@@ -144,8 +177,71 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::StartPaintGroup { id, visible } => {
+                    self.push_paint_group(*id, *visible)
+                }
+                PaintOperation::EndPaintGroup => self.pop_paint_group(),
             }
         }
+    }
+
+    pub(crate) fn set_paint_group_visibility(
+        &mut self,
+        id: PaintGroupId,
+        visible: bool,
+    ) -> Option<bool> {
+        let mut found = false;
+        let mut changed = false;
+        for operation in &mut self.paint_operations {
+            if let PaintOperation::StartPaintGroup {
+                id: operation_id,
+                visible: operation_visible,
+            } = operation
+                && *operation_id == id
+            {
+                found = true;
+                if *operation_visible != visible {
+                    *operation_visible = visible;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.rebuild_primitive_lists();
+        }
+        found.then_some(changed)
+    }
+
+    fn rebuild_primitive_lists(&mut self) {
+        self.paths.clear();
+        self.shadows.clear();
+        self.quads.clear();
+        self.underlines.clear();
+        self.monochrome_sprites.clear();
+        self.subpixel_sprites.clear();
+        self.polychrome_sprites.clear();
+        self.surfaces.clear();
+
+        let operations = std::mem::take(&mut self.paint_operations);
+        let mut visibility = Vec::new();
+        for operation in &operations {
+            match operation {
+                PaintOperation::Primitive(primitive)
+                    if visibility.iter().all(|visible| *visible) =>
+                {
+                    let mut primitive = primitive.clone();
+                    self.push_primitive(&mut primitive);
+                }
+                PaintOperation::StartPaintGroup { visible, .. } => visibility.push(*visible),
+                PaintOperation::EndPaintGroup => {
+                    visibility.pop().expect("unbalanced paint group");
+                }
+                _ => {}
+            }
+        }
+        debug_assert!(visibility.is_empty());
+        self.paint_operations = operations;
+        self.finish();
     }
 
     pub fn finish(&mut self) {
@@ -215,6 +311,8 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+    StartPaintGroup { id: PaintGroupId, visible: bool },
+    EndPaintGroup,
 }
 
 #[derive(Clone)]
@@ -232,6 +330,19 @@ pub enum Primitive {
 
 #[expect(missing_docs)]
 impl Primitive {
+    fn set_order(&mut self, order: DrawOrder) {
+        match self {
+            Primitive::Shadow(primitive) => primitive.order = order,
+            Primitive::Quad(primitive) => primitive.order = order,
+            Primitive::Path(primitive) => primitive.order = order,
+            Primitive::Underline(primitive) => primitive.order = order,
+            Primitive::MonochromeSprite(primitive) => primitive.order = order,
+            Primitive::SubpixelSprite(primitive) => primitive.order = order,
+            Primitive::PolychromeSprite(primitive) => primitive.order = order,
+            Primitive::Surface(primitive) => primitive.order = order,
+        }
+    }
+
     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
         match self {
             Primitive::Shadow(shadow) => &shadow.bounds,
@@ -776,6 +887,85 @@ pub struct PaintSurface {
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
         Primitive::Surface(surface)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_quad(x: f32) -> Quad {
+        Quad {
+            bounds: Bounds::new(
+                Point::new(ScaledPixels(x), ScaledPixels(0.)),
+                Size::new(ScaledPixels(1.), ScaledPixels(1.)),
+            ),
+            content_mask: ContentMask {
+                bounds: Bounds::new(
+                    Point::new(ScaledPixels(0.), ScaledPixels(0.)),
+                    Size::new(ScaledPixels(100.), ScaledPixels(100.)),
+                ),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn paint_group_visibility_rebuilds_only_derived_primitives() {
+        let group = PaintGroupId::new();
+        let mut scene = Scene::default();
+        scene.insert_primitive(test_quad(1.));
+        scene.push_paint_group(group, true);
+        scene.insert_primitive(test_quad(2.));
+        scene.pop_paint_group();
+        scene.insert_primitive(test_quad(3.));
+        scene.finish();
+
+        assert_eq!(
+            scene
+                .quads
+                .iter()
+                .map(|quad| quad.bounds.origin.x.0)
+                .collect::<Vec<_>>(),
+            vec![1., 2., 3.]
+        );
+        assert_eq!(scene.set_paint_group_visibility(group, false), Some(true));
+        assert_eq!(
+            scene
+                .quads
+                .iter()
+                .map(|quad| quad.bounds.origin.x.0)
+                .collect::<Vec<_>>(),
+            vec![1., 3.]
+        );
+        assert_eq!(scene.set_paint_group_visibility(group, true), Some(true));
+        assert_eq!(scene.set_paint_group_visibility(group, true), Some(false));
+        assert_eq!(
+            scene
+                .quads
+                .iter()
+                .map(|quad| quad.bounds.origin.x.0)
+                .collect::<Vec<_>>(),
+            vec![1., 2., 3.]
+        );
+    }
+
+    #[test]
+    fn hidden_parent_paint_group_hides_nested_groups() {
+        let parent = PaintGroupId::new();
+        let child = PaintGroupId::new();
+        let mut scene = Scene::default();
+        scene.push_paint_group(parent, false);
+        scene.push_paint_group(child, true);
+        scene.insert_primitive(test_quad(1.));
+        scene.pop_paint_group();
+        scene.pop_paint_group();
+
+        assert!(scene.quads.is_empty());
+        assert_eq!(scene.set_paint_group_visibility(parent, true), Some(true));
+        assert_eq!(scene.quads.len(), 1);
+        assert_eq!(scene.set_paint_group_visibility(child, false), Some(true));
+        assert!(scene.quads.is_empty());
     }
 }
 

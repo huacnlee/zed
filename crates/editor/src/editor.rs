@@ -164,11 +164,11 @@ use gpui::{
     AvailableSpace, Background, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context,
     DispatchPhase, Edges, Entity, EntityId, EntityInputHandler, EventEmitter, FocusHandle,
     FocusOutEvent, Focusable, FontId, FontStyle, FontWeight, Global, HighlightStyle, Hsla, IsZero,
-    KeyContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, ParentElement,
-    Pixels, PressureStage, Render, ScrollHandle, SharedString, SharedUri, Size, Stateful, Styled,
-    Subscription, Task, TextRun, TextStyle, TextStyleRefinement, UTF16Selection, UnderlineStyle,
-    UniformListScrollHandle, WeakEntity, WeakFocusHandle, Window, div, point, prelude::*,
-    pulsating_between, px, relative, size,
+    KeyContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PaintGroupId, PaintQuad,
+    ParentElement, Pixels, PressureStage, Render, ScrollHandle, SharedString, SharedUri, Size,
+    Stateful, Styled, Subscription, Task, TextRun, TextStyle, TextStyleRefinement, UTF16Selection,
+    UnderlineStyle, UniformListScrollHandle, WeakEntity, WeakFocusHandle, Window, div, point,
+    prelude::*, pulsating_between, px, relative, size,
 };
 use hover_links::{HoverLink, HoveredLinkState, find_file};
 use hover_popover::{HoverState, hide_hover};
@@ -964,6 +964,10 @@ pub struct Editor {
     completion_provider: Option<Rc<dyn CompletionProvider>>,
     collaboration_hub: Option<Box<dyn CollaborationHub>>,
     blink_manager: Entity<BlinkManager>,
+    local_cursor_visible: bool,
+    cursor_paint_group: PaintGroupId,
+    #[cfg(test)]
+    render_count: usize,
     show_cursor_names: bool,
     hovered_cursors: HashMap<HoveredCursor, Task<()>>,
     pub show_local_selections: bool,
@@ -2279,6 +2283,10 @@ impl Editor {
             collaboration_hub: project.clone().map(|project| Box::new(project) as _),
             project,
             blink_manager: blink_manager.clone(),
+            local_cursor_visible: blink_manager.read(cx).visible(),
+            cursor_paint_group: PaintGroupId::new(),
+            #[cfg(test)]
+            render_count: 0,
             show_local_selections: true,
             show_scrollbars: ScrollbarAxes {
                 horizontal: full_mode,
@@ -2423,7 +2431,19 @@ impl Editor {
                         cx.observe(&multi_buffer, Self::on_buffer_changed),
                         cx.subscribe_in(&multi_buffer, window, Self::on_buffer_event),
                         cx.observe_in(&display_map, window, Self::on_display_map_changed),
-                        cx.observe(&blink_manager, |_, _, cx| cx.notify()),
+                        cx.observe_in(
+                            &blink_manager,
+                            window,
+                            |editor, blink_manager, window, cx| {
+                                editor.local_cursor_visible = blink_manager.read(cx).visible();
+                                let visible = editor.show_local_cursors(window, cx);
+                                if !window
+                                    .set_paint_group_visibility(editor.cursor_paint_group, visible)
+                                {
+                                    cx.notify();
+                                }
+                            },
+                        ),
                         cx.observe_global_in::<SettingsStore>(window, Self::settings_changed),
                         cx.observe_global_in::<GlobalTheme>(window, Self::theme_changed),
                         observe_buffer_font_size_adjustment(cx, |_, cx| cx.notify()),
@@ -9474,9 +9494,12 @@ impl Editor {
         }
     }
 
-    pub fn show_local_cursors(&self, window: &mut Window, cx: &mut App) -> bool {
-        (self.read_only(cx) || self.blink_manager.read(cx).visible())
-            && self.focus_handle.is_focused(window)
+    pub fn show_local_cursors(&self, window: &Window, cx: &App) -> bool {
+        (self.read_only(cx) || self.local_cursor_visible) && self.focus_handle.is_focused(window)
+    }
+
+    pub(crate) fn layout_local_cursors(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
     }
 
     pub fn set_show_cursor_when_unfocused(&mut self, is_enabled: bool, cx: &mut Context<Self>) {
@@ -11911,6 +11934,10 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.render_count += 1;
+        }
         EditorElement::new(&cx.entity(), self.create_style(cx))
     }
 }

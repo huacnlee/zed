@@ -117,4 +117,10 @@ impl BlinkManager {
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
     }
+
+    #[cfg(test)]
+    pub(crate) fn toggle_cursor(&mut self, cx: &mut Context<Self>) {
+        self.visible = !self.visible;
+        cx.notify();
+    }
 }

@@ -282,17 +282,30 @@ impl<V: View> IntoElement for ViewElement<V> {
     }
 }
 
+#[derive(Default)]
 struct ViewElementState {
+    layout: Option<ViewElementLayoutState>,
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
-    cache_key: ViewElementCacheKey,
+    cache_key: Option<ViewElementCacheKey>,
     accessed_entities: FxHashSet<EntityId>,
+}
+
+struct ViewElementLayoutState {
+    layout_id: LayoutId,
+    layout_generation: u64,
+    rem_size: Pixels,
+    scale_factor: f32,
+    text_style: TextStyle,
+    image_cache_id: Option<EntityId>,
 }
 
 struct ViewElementCacheKey {
     bounds: Bounds<Pixels>,
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
+    opacity: f32,
+    image_cache_id: Option<EntityId>,
 }
 
 impl<V: View> Element for ViewElement<V> {
@@ -313,7 +326,7 @@ impl<V: View> Element for ViewElement<V> {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
@@ -330,6 +343,56 @@ impl<V: View> Element for ViewElement<V> {
                         (layout_id, None)
                     }
                     _ => {
+                        if let Some(global_id) = global_id {
+                            let rem_size = window.rem_size();
+                            let scale_factor = window.scale_factor();
+                            let text_style = window.text_style();
+                            let image_cache_id = window.image_cache_id();
+                            let layout_generation = window.layout_generation();
+                            return window.with_element_state::<ViewElementState, _>(
+                                global_id,
+                                |element_state, window| {
+                                    let mut element_state = element_state.unwrap_or_default();
+                                    if let Some(layout_state) = element_state.layout.as_ref()
+                                        && layout_state.layout_generation == layout_generation
+                                        && layout_state.rem_size == rem_size
+                                        && layout_state.scale_factor == scale_factor
+                                        && layout_state.text_style == text_style
+                                        && layout_state.image_cache_id == image_cache_id
+                                        && !window.dirty_views.contains(&entity_id)
+                                        && !window.refreshing
+                                        && !caching_disabled
+                                    {
+                                        window.reuse_layout(layout_state.layout_id);
+                                        let layout_id = layout_state.layout_id;
+                                        return ((layout_id, None), element_state);
+                                    }
+
+                                    let ((layout_id, element), accessed_entities) = cx
+                                        .detect_accessed_entities(|cx| {
+                                            let mut element = self
+                                                .view
+                                                .take()
+                                                .unwrap()
+                                                .render(window, cx)
+                                                .into_any_element();
+                                            let layout_id = element.request_layout(window, cx);
+                                            (layout_id, element)
+                                        });
+                                    element_state.layout = Some(ViewElementLayoutState {
+                                        layout_id,
+                                        layout_generation,
+                                        rem_size,
+                                        scale_factor,
+                                        text_style,
+                                        image_cache_id,
+                                    });
+                                    element_state.accessed_entities = accessed_entities;
+                                    ((layout_id, Some(element)), element_state)
+                                },
+                            );
+                        }
+
                         let mut element = self
                             .view
                             .take()
@@ -373,31 +436,61 @@ impl<V: View> Element for ViewElement<V> {
             window.set_view_id(entity_id);
             window.with_rendered_view(entity_id, |window| {
                 if let Some(mut element) = element.take() {
+                    let prepaint_start = window.prepaint_index();
                     element.prepaint(window, cx);
+                    let prepaint_end = window.prepaint_index();
+                    let content_mask = window.content_mask();
+                    let text_style = window.text_style();
+                    let opacity = window.element_opacity();
+                    let image_cache_id = window.image_cache_id();
+                    window.with_element_state::<ViewElementState, _>(
+                        global_id.unwrap(),
+                        |element_state, _| {
+                            let mut element_state = element_state.unwrap_or_default();
+                            element_state.prepaint_range = prepaint_start..prepaint_end;
+                            element_state.paint_range =
+                                PaintIndex::default()..PaintIndex::default();
+                            element_state.cache_key = Some(ViewElementCacheKey {
+                                bounds,
+                                content_mask,
+                                text_style,
+                                opacity,
+                                image_cache_id,
+                            });
+                            ((), element_state)
+                        },
+                    );
                     return Some(element);
                 }
 
                 window.with_element_state::<ViewElementState, _>(
                     global_id.unwrap(),
-                    |element_state, window| {
+                    |mut element_state, window| {
                         let content_mask = window.content_mask();
                         let text_style = window.text_style();
+                        let opacity = window.element_opacity();
+                        let image_cache_id = window.image_cache_id();
 
-                        if let Some(mut element_state) = element_state
-                            && element_state.cache_key.bounds == bounds
-                            && element_state.cache_key.content_mask == content_mask
-                            && element_state.cache_key.text_style == text_style
-                            && !window.dirty_views.contains(&entity_id)
-                            && !window.refreshing
-                        {
-                            let prepaint_start = window.prepaint_index();
-                            window.reuse_prepaint(element_state.prepaint_range.clone());
-                            cx.entities
-                                .extend_accessed(&element_state.accessed_entities);
-                            let prepaint_end = window.prepaint_index();
-                            element_state.prepaint_range = prepaint_start..prepaint_end;
+                        if element_state.as_ref().is_some_and(|element_state| {
+                            element_state.cache_key.as_ref().is_some_and(|cache_key| {
+                                cache_key.bounds == bounds
+                                    && cache_key.content_mask == content_mask
+                                    && cache_key.text_style == text_style
+                                    && cache_key.opacity == opacity
+                                    && cache_key.image_cache_id == image_cache_id
+                            }) && !window.dirty_views.contains(&entity_id)
+                                && !window.refreshing
+                        }) {
+                            if let Some(mut element_state) = element_state.take() {
+                                let prepaint_start = window.prepaint_index();
+                                window.reuse_prepaint(element_state.prepaint_range.clone());
+                                cx.entities
+                                    .extend_accessed(&element_state.accessed_entities);
+                                let prepaint_end = window.prepaint_index();
+                                element_state.prepaint_range = prepaint_start..prepaint_end;
 
-                            return (None, element_state);
+                                return (None, element_state);
+                            }
                         }
 
                         let refreshing = mem::replace(&mut window.refreshing, true);
@@ -417,19 +510,19 @@ impl<V: View> Element for ViewElement<V> {
                         let prepaint_end = window.prepaint_index();
                         window.refreshing = refreshing;
 
-                        (
-                            Some(element),
-                            ViewElementState {
-                                accessed_entities,
-                                prepaint_range: prepaint_start..prepaint_end,
-                                paint_range: PaintIndex::default()..PaintIndex::default(),
-                                cache_key: ViewElementCacheKey {
-                                    bounds,
-                                    content_mask,
-                                    text_style,
-                                },
-                            },
-                        )
+                        let mut element_state = element_state.unwrap_or_default();
+                        element_state.accessed_entities = accessed_entities;
+                        element_state.prepaint_range = prepaint_start..prepaint_end;
+                        element_state.paint_range = PaintIndex::default()..PaintIndex::default();
+                        element_state.cache_key = Some(ViewElementCacheKey {
+                            bounds,
+                            content_mask,
+                            text_style,
+                            opacity,
+                            image_cache_id,
+                        });
+
+                        (Some(element), element_state)
                     },
                 )
             })
@@ -458,32 +551,27 @@ impl<V: View> Element for ViewElement<V> {
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
             window.with_rendered_view(entity_id, |window| {
-                let caching_disabled = window.is_inspector_picking(cx);
-                if self.cached_style.is_some() && !caching_disabled {
-                    window.with_element_state::<ViewElementState, _>(
-                        global_id.unwrap(),
-                        |element_state, window| {
-                            let mut element_state = element_state.unwrap();
+                window.with_element_state::<ViewElementState, _>(
+                    global_id.unwrap(),
+                    |element_state, window| {
+                        let mut element_state = element_state.unwrap_or_default();
 
-                            let paint_start = window.paint_index();
+                        let paint_start = window.paint_index();
 
-                            if let Some(element) = element {
-                                let refreshing = mem::replace(&mut window.refreshing, true);
-                                element.paint(window, cx);
-                                window.refreshing = refreshing;
-                            } else {
-                                window.reuse_paint(element_state.paint_range.clone());
-                            }
+                        if let Some(element) = element {
+                            let refreshing = mem::replace(&mut window.refreshing, true);
+                            element.paint(window, cx);
+                            window.refreshing = refreshing;
+                        } else {
+                            window.reuse_paint(element_state.paint_range.clone());
+                        }
 
-                            let paint_end = window.paint_index();
-                            element_state.paint_range = paint_start..paint_end;
+                        let paint_end = window.paint_index();
+                        element_state.paint_range = paint_start..paint_end;
 
-                            ((), element_state)
-                        },
-                    )
-                } else {
-                    element.as_mut().unwrap().paint(window, cx);
-                }
+                        ((), element_state)
+                    },
+                )
             });
         } else {
             // Stateless path: just paint the element.
@@ -503,5 +591,214 @@ pub struct EmptyView;
 impl Render for EmptyView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AppContext as _, TestAppContext, div, prelude::*, px, size};
+    use std::{cell::Cell, rc::Rc};
+
+    struct CountedView {
+        render_count: Rc<Cell<usize>>,
+    }
+
+    impl Render for CountedView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.render_count.set(self.render_count.get() + 1);
+            div().size(px(20.))
+        }
+    }
+
+    struct ChangingView {
+        wide: bool,
+    }
+
+    impl Render for ChangingView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .h(px(20.))
+                .w(if self.wide { px(40.) } else { px(20.) })
+        }
+    }
+
+    struct SiblingRoot {
+        counted: Entity<CountedView>,
+        changing: Entity<ChangingView>,
+    }
+
+    impl Render for SiblingRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .child(self.counted.clone())
+                .child(self.changing.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn clean_sibling_reuses_its_rendered_layout(cx: &mut TestAppContext) {
+        let render_count = Rc::new(Cell::new(0));
+        let window = cx.open_window(size(px(200.), px(100.)), {
+            let render_count = render_count.clone();
+            |_, cx| SiblingRoot {
+                counted: cx.new(|_| CountedView { render_count }),
+                changing: cx.new(|_| ChangingView { wide: false }),
+            }
+        });
+        cx.run_until_parked();
+        let initial_render_count = render_count.get();
+
+        window
+            .update(cx, |root, _, cx| {
+                root.changing.update(cx, |changing, cx| {
+                    changing.wide = true;
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), initial_render_count);
+
+        window
+            .update(cx, |root, _, cx| {
+                root.changing.update(cx, |changing, cx| {
+                    changing.wide = false;
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(render_count.get(), initial_render_count);
+    }
+
+    struct OpacityRoot {
+        child: Entity<CountedView>,
+        opacity: f32,
+    }
+
+    impl Render for OpacityRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().opacity(self.opacity).child(self.child.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn inherited_opacity_invalidates_cached_paint(cx: &mut TestAppContext) {
+        let render_count = Rc::new(Cell::new(0));
+        let window = cx.open_window(size(px(200.), px(100.)), {
+            let render_count = render_count.clone();
+            |_, cx| OpacityRoot {
+                child: cx.new(|_| CountedView { render_count }),
+                opacity: 1.,
+            }
+        });
+        cx.run_until_parked();
+        let initial_render_count = render_count.get();
+
+        window
+            .update(cx, |root, _, cx| {
+                root.opacity = 0.5;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(render_count.get(), initial_render_count + 1);
+    }
+
+    struct MovableChild;
+
+    impl Render for MovableChild {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size(px(20.))
+                .debug_selector(|| "MOVABLE_CHILD".into())
+        }
+    }
+
+    struct MovingRoot {
+        child: Entity<MovableChild>,
+        child_on_right: bool,
+    }
+
+    impl Render for MovingRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .when(!self.child_on_right, |element| {
+                    element.child(self.child.clone())
+                })
+                .child(div().w(px(100.)).h(px(20.)))
+                .when(self.child_on_right, |element| {
+                    element.child(self.child.clone())
+                })
+        }
+    }
+
+    #[gpui::test]
+    fn reused_layout_can_move_to_a_new_parent_position(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(200.), px(100.)), |_, cx| MovingRoot {
+            child: cx.new(|_| MovableChild),
+            child_on_right: false,
+        });
+        cx.run_until_parked();
+
+        let initial_x = window
+            .update(cx, |_, window, _| {
+                window.rendered_frame.debug_bounds["MOVABLE_CHILD"].origin.x
+            })
+            .unwrap();
+        window
+            .update(cx, |root, _, cx| {
+                root.child_on_right = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let moved_x = window
+            .update(cx, |_, window, _| {
+                window.rendered_frame.debug_bounds["MOVABLE_CHILD"].origin.x
+            })
+            .unwrap();
+
+        assert_eq!(moved_x - initial_x, px(100.));
+    }
+
+    #[gpui::test]
+    fn discarded_layout_subtrees_are_reclaimed(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(200.), px(100.)), |_, cx| MovingRoot {
+            child: cx.new(|_| MovableChild),
+            child_on_right: false,
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |root, _, cx| {
+                root.child_on_right = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let initial_node_count = window
+            .update(cx, |_, window, _| window.layout_node_count())
+            .unwrap();
+
+        for child_on_right in [false, true].into_iter().cycle().take(20) {
+            window
+                .update(cx, |root, _, cx| {
+                    root.child_on_right = child_on_right;
+                    cx.notify();
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+
+        window
+            .update(cx, |_, window, _| {
+                assert_eq!(window.layout_node_count(), initial_node_count);
+            })
+            .unwrap();
     }
 }

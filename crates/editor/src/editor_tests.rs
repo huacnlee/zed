@@ -2628,6 +2628,41 @@ fn test_only_focused_editor_blinks_across_window_activation(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn test_cursor_blink_does_not_render_editor(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let window = cx.add_window(|window, cx| Editor::single_line(window, cx));
+    let editor = window.root(cx).unwrap();
+    window
+        .update(cx, |editor, window, cx| {
+            window.focus(&editor.focus_handle(cx), cx);
+        })
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(*window, cx);
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        let editor = editor.read(cx);
+        let visible = editor.show_local_cursors(window, cx);
+        assert!(window.set_paint_group_visibility(editor.cursor_paint_group, !visible));
+        assert!(window.set_paint_group_visibility(editor.cursor_paint_group, visible));
+    });
+
+    let render_count = editor.read_with(cx, |editor, _| editor.render_count);
+    editor.update(cx, |editor, cx| {
+        editor
+            .blink_manager
+            .update(cx, blink_manager::BlinkManager::toggle_cursor);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        editor.read_with(cx, |editor, _| editor.render_count),
+        render_count
+    );
+}
+
+#[gpui::test]
 fn test_beginning_end_of_line_ignore_soft_wrap(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
     let move_to_beg = MoveToBeginningOfLine {
