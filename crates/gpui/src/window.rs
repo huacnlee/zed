@@ -3904,8 +3904,8 @@ impl Window {
         result
     }
 
-    /// Changes a retained paint group's visibility, presents it immediately when changed, and
-    /// returns whether the group exists.
+    /// Changes a retained paint group's visibility, schedules it for presentation, and returns
+    /// whether the group exists.
     pub fn set_paint_group_visibility(&mut self, id: PaintGroupId, visible: bool) -> bool {
         let Some(changed) = self
             .rendered_frame
@@ -3915,7 +3915,7 @@ impl Window {
             return false;
         };
         if changed {
-            self.present();
+            self.needs_present.set(true);
         }
         true
     }

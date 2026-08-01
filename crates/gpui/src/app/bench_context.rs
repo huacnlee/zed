@@ -479,6 +479,7 @@ impl<'a, 'measurement> BenchAppContext<'a, 'measurement> {
             visible = !visible;
             self.with_window(view.entity_id(), |window, _| {
                 assert!(window.set_paint_group_visibility(group, visible));
+                window.present_if_needed();
             })
             .expect("cannot benchmark paint group for entity without a current window");
         };
