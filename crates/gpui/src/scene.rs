@@ -41,6 +41,7 @@ impl From<bool> for PaddedBool32 {
 pub struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
+    pending_batch: Option<PendingBatch>,
     layer_stack: Vec<DrawOrder>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
@@ -57,6 +58,7 @@ impl Scene {
     pub fn clear(&mut self) {
         self.paint_operations.clear();
         self.primitive_bounds.clear();
+        self.pending_batch = None;
         self.layer_stack.clear();
         self.paths.clear();
         self.shadows.clear();
@@ -73,6 +75,7 @@ impl Scene {
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
+        self.flush_pending_batch();
         let order = self.primitive_bounds.insert(bounds);
         self.layer_stack.push(order);
         self.paint_operations
@@ -80,6 +83,7 @@ impl Scene {
     }
 
     pub fn pop_layer(&mut self) {
+        self.flush_pending_batch();
         self.layer_stack.pop();
         self.paint_operations.push(PaintOperation::EndLayer);
     }
@@ -94,48 +98,86 @@ impl Scene {
             return;
         }
 
+        if self.layer_stack.is_empty() {
+            let kind = primitive.kind();
+            if self
+                .pending_batch
+                .as_ref()
+                .is_some_and(|pending_batch| pending_batch.kind != kind)
+            {
+                self.flush_pending_batch();
+            }
+
+            if let Some(pending_batch) = &mut self.pending_batch {
+                pending_batch.bounds = pending_batch.bounds.union(&clipped_bounds);
+            } else {
+                self.pending_batch = Some(PendingBatch {
+                    kind,
+                    bounds: clipped_bounds,
+                    operations_start: self.paint_operations.len(),
+                });
+            }
+            self.paint_operations
+                .push(PaintOperation::Primitive(primitive));
+            return;
+        }
+
         let order = self
             .layer_stack
             .last()
             .copied()
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
-        match &mut primitive {
+        primitive.set_order(order);
+        self.push_primitive(&mut primitive);
+        self.paint_operations
+            .push(PaintOperation::Primitive(primitive));
+    }
+
+    fn flush_pending_batch(&mut self) {
+        let Some(pending_batch) = self.pending_batch.take() else {
+            return;
+        };
+        let order = self.primitive_bounds.insert(pending_batch.bounds);
+        for operation_index in pending_batch.operations_start..self.paint_operations.len() {
+            let mut primitive = match &mut self.paint_operations[operation_index] {
+                PaintOperation::Primitive(primitive) => {
+                    primitive.set_order(order);
+                    primitive.clone()
+                }
+                _ => unreachable!("pending batches contain only primitives"),
+            };
+            self.push_primitive(&mut primitive);
+        }
+    }
+
+    fn push_primitive(&mut self, primitive: &mut Primitive) {
+        match primitive {
             Primitive::Shadow(shadow) => {
-                shadow.order = order;
                 self.shadows.push(*shadow);
             }
             Primitive::Quad(quad) => {
-                quad.order = order;
                 self.quads.push(*quad);
             }
             Primitive::Path(path) => {
-                path.order = order;
                 path.id = PathId(self.paths.len());
                 self.paths.push(path.clone());
             }
             Primitive::Underline(underline) => {
-                underline.order = order;
                 self.underlines.push(*underline);
             }
             Primitive::MonochromeSprite(sprite) => {
-                sprite.order = order;
                 self.monochrome_sprites.push(*sprite);
             }
             Primitive::SubpixelSprite(sprite) => {
-                sprite.order = order;
                 self.subpixel_sprites.push(*sprite);
             }
             Primitive::PolychromeSprite(sprite) => {
-                sprite.order = order;
                 self.polychrome_sprites.push(*sprite);
             }
             Primitive::Surface(surface) => {
-                surface.order = order;
                 self.surfaces.push(surface.clone());
             }
         }
-        self.paint_operations
-            .push(PaintOperation::Primitive(primitive));
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
@@ -149,6 +191,7 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
+        self.flush_pending_batch();
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
@@ -170,6 +213,7 @@ impl Scene {
         allow(dead_code)
     )]
     pub fn batches(&self) -> impl Iterator<Item = PrimitiveBatch> + '_ {
+        debug_assert!(self.pending_batch.is_none(), "scene must be finished");
         BatchIterator {
             shadows_start: 0,
             shadows_iter: self.shadows.iter().peekable(),
@@ -189,6 +233,12 @@ impl Scene {
             surfaces_iter: self.surfaces.iter().peekable(),
         }
     }
+}
+
+struct PendingBatch {
+    kind: PrimitiveKind,
+    bounds: Bounds<ScaledPixels>,
+    operations_start: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Default)]
@@ -232,6 +282,32 @@ pub enum Primitive {
 
 #[expect(missing_docs)]
 impl Primitive {
+    fn kind(&self) -> PrimitiveKind {
+        match self {
+            Primitive::Shadow(_) => PrimitiveKind::Shadow,
+            Primitive::Quad(_) => PrimitiveKind::Quad,
+            Primitive::Path(_) => PrimitiveKind::Path,
+            Primitive::Underline(_) => PrimitiveKind::Underline,
+            Primitive::MonochromeSprite(_) => PrimitiveKind::MonochromeSprite,
+            Primitive::SubpixelSprite(_) => PrimitiveKind::SubpixelSprite,
+            Primitive::PolychromeSprite(_) => PrimitiveKind::PolychromeSprite,
+            Primitive::Surface(_) => PrimitiveKind::Surface,
+        }
+    }
+
+    fn set_order(&mut self, order: DrawOrder) {
+        match self {
+            Primitive::Shadow(primitive) => primitive.order = order,
+            Primitive::Quad(primitive) => primitive.order = order,
+            Primitive::Path(primitive) => primitive.order = order,
+            Primitive::Underline(primitive) => primitive.order = order,
+            Primitive::MonochromeSprite(primitive) => primitive.order = order,
+            Primitive::SubpixelSprite(primitive) => primitive.order = order,
+            Primitive::PolychromeSprite(primitive) => primitive.order = order,
+            Primitive::Surface(primitive) => primitive.order = order,
+        }
+    }
+
     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
         match self {
             Primitive::Shadow(shadow) => &shadow.bounds,
@@ -776,6 +852,121 @@ pub struct PaintSurface {
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
         Primitive::Surface(surface)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_bounds(x: f32) -> Bounds<ScaledPixels> {
+        Bounds::new(
+            Point::new(ScaledPixels(x), ScaledPixels(0.)),
+            Size::new(ScaledPixels(1.), ScaledPixels(1.)),
+        )
+    }
+
+    fn test_content_mask() -> ContentMask<ScaledPixels> {
+        ContentMask {
+            bounds: Bounds::new(
+                Point::new(ScaledPixels(0.), ScaledPixels(0.)),
+                Size::new(ScaledPixels(100.), ScaledPixels(100.)),
+            ),
+        }
+    }
+
+    fn test_quad(x: f32) -> Quad {
+        Quad {
+            bounds: test_bounds(x),
+            content_mask: test_content_mask(),
+            ..Default::default()
+        }
+    }
+
+    fn test_shadow(x: f32) -> Shadow {
+        let bounds = test_bounds(x);
+        Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(0.),
+            bounds,
+            corner_radii: Corners::default(),
+            content_mask: test_content_mask(),
+            color: Hsla::default(),
+            element_bounds: bounds,
+            element_corner_radii: Corners::default(),
+            inset: 0,
+            pad: 0,
+        }
+    }
+
+    fn primitive_order(primitive: &Primitive) -> DrawOrder {
+        match primitive {
+            Primitive::Shadow(primitive) => primitive.order,
+            Primitive::Quad(primitive) => primitive.order,
+            Primitive::Path(primitive) => primitive.order,
+            Primitive::Underline(primitive) => primitive.order,
+            Primitive::MonochromeSprite(primitive) => primitive.order,
+            Primitive::SubpixelSprite(primitive) => primitive.order,
+            Primitive::PolychromeSprite(primitive) => primitive.order,
+            Primitive::Surface(primitive) => primitive.order,
+        }
+    }
+
+    #[test]
+    fn consecutive_primitives_of_one_kind_share_a_safe_order() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(test_shadow(0.));
+        scene.insert_primitive(test_quad(10.));
+        scene.insert_primitive(test_quad(0.));
+        scene.insert_primitive(test_shadow(10.));
+        scene.finish();
+
+        assert_eq!(
+            scene
+                .shadows
+                .iter()
+                .map(|shadow| shadow.order)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            scene
+                .quads
+                .iter()
+                .map(|quad| quad.order)
+                .collect::<Vec<_>>(),
+            vec![2, 2]
+        );
+    }
+
+    #[test]
+    fn batched_orders_preserve_overlapping_cross_kind_paint_order() {
+        let mut scene = Scene::default();
+        for index in 0..200 {
+            let x = (index % 7) as f32;
+            if (index / 4) % 2 == 0 {
+                scene.insert_primitive(test_quad(x));
+            } else {
+                scene.insert_primitive(test_shadow(x));
+            }
+        }
+        scene.finish();
+
+        for (earlier_index, earlier_operation) in scene.paint_operations.iter().enumerate() {
+            let PaintOperation::Primitive(earlier) = earlier_operation else {
+                continue;
+            };
+            for later_operation in &scene.paint_operations[earlier_index + 1..] {
+                let PaintOperation::Primitive(later) = later_operation else {
+                    continue;
+                };
+                if earlier.kind() != later.kind()
+                    && !earlier.bounds().intersect(later.bounds()).is_empty()
+                {
+                    assert!(primitive_order(earlier) < primitive_order(later));
+                }
+            }
+        }
     }
 }
 
