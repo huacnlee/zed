@@ -1617,7 +1617,11 @@ impl Window {
                         // next frame callback, so we must call `surface.commit()` (via
                         // `complete_frame`) or the compositor won't send another callback.
                         handle
-                            .update(&mut cx, |_, window, _| window.complete_frame())
+                            .update(&mut cx, |_, window, _| {
+                                window.complete_frame();
+                                #[cfg(target_os = "macos")]
+                                window.platform_window.request_frame();
+                            })
                             .log_err();
                         return;
                     }
@@ -1665,6 +1669,10 @@ impl Window {
 
                 handle
                     .update(&mut cx, |_, window, _| {
+                        #[cfg(target_os = "macos")]
+                        if needs_present {
+                            window.platform_window.request_frame();
+                        }
                         window.complete_frame();
                     })
                     .log_err();
@@ -2340,6 +2348,8 @@ impl Window {
     /// Schedule the given closure to be run directly after the current frame is rendered.
     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
+        #[cfg(target_os = "macos")]
+        self.platform_window.request_frame();
     }
 
     /// Schedule a frame to be drawn on the next animation frame.

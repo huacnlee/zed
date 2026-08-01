@@ -41,7 +41,6 @@ use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
 use core_graphics::display::{CGDirectDisplayID, CGRect};
 use ctor::ctor;
 use futures::channel::oneshot;
-use gpui_util::ResultExt;
 use objc::{
     class,
     declare::ClassDecl,
@@ -508,6 +507,7 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
+    frame_requested: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -668,28 +668,35 @@ impl MacWindowState {
     }
 
     fn start_display_link(&mut self) {
-        self.stop_display_link();
         unsafe {
             if !self
                 .native_window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
             {
+                self.frame_requested = false;
                 return;
             }
         }
         let Some(display_id) = display_id_for_screen(unsafe { self.native_window.screen() }) else {
             // AppKit can temporarily report no screen while displays are being reconfigured.
+            self.frame_requested = false;
             return;
         };
+        self.frame_requested = true;
         let data = self.native_view.as_ptr() as *mut c_void;
-        self.frame_source
+        if let Err(error) = self
+            .frame_source
             .get_or_insert_with(|| WindowFrameSource::new(data, step))
             .start(display_id)
-            .log_err();
+        {
+            self.frame_requested = false;
+            log::error!("failed to start display link: {error:#}");
+        }
     }
 
     fn stop_display_link(&mut self) {
+        self.frame_requested = false;
         if let Some(frame_source) = self.frame_source.as_mut() {
             frame_source.stop();
         }
@@ -904,6 +911,7 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 frame_source: None,
+                frame_requested: false,
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -1663,7 +1671,13 @@ impl PlatformWindow for MacWindow {
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
-        self.0.as_ref().lock().request_frame_callback = Some(callback);
+        let mut state = self.0.as_ref().lock();
+        state.request_frame_callback = Some(callback);
+        state.start_display_link();
+    }
+
+    fn request_frame(&self) {
+        self.0.as_ref().lock().start_display_link();
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
@@ -2713,7 +2727,6 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
                 lock.renderer.set_presents_with_transaction(false);
-                lock.start_display_link();
             }
         } else {
             lock.activated_least_once = true;
@@ -2827,7 +2840,6 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
         lock.renderer.set_presents_with_transaction(false);
-        lock.start_display_link();
     }
 }
 
@@ -2837,9 +2849,14 @@ extern "C" fn step(view: *mut c_void) {
     let mut lock = window_state.lock();
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
+        lock.frame_requested = false;
         drop(lock);
         callback(Default::default());
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+        if !lock.frame_requested {
+            lock.stop_display_link();
+        }
     }
 }
 

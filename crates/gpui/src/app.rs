@@ -1658,6 +1658,13 @@ impl App {
                 }
 
                 if self.pending_effects.is_empty() {
+                    #[cfg(target_os = "macos")]
+                    for window in self.windows.values().filter_map(|window| {
+                        let window = window.as_deref()?;
+                        window.invalidator.is_dirty().then_some(window)
+                    }) {
+                        window.platform_window.request_frame();
+                    }
                     self.event_arena.clear();
                     break;
                 }

@@ -288,6 +288,9 @@ impl PlatformWindow for TestWindow {
 
     fn on_request_frame(&self, _callback: Box<dyn FnMut(RequestFrameOptions)>) {}
 
+    #[cfg(target_os = "macos")]
+    fn request_frame(&self) {}
+
     fn on_input(&self, callback: Box<dyn FnMut(crate::PlatformInput) -> DispatchEventResult>) {
         self.0.lock().input_callback = Some(callback)
     }

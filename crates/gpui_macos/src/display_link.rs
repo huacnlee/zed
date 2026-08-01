@@ -256,6 +256,12 @@ impl WindowFrameSource {
     }
 
     pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
+        if self
+            .registration
+            .is_some_and(|(registered_display_id, _)| registered_display_id == display_id)
+        {
+            return Ok(());
+        }
         self.stop();
         let subscriber_id = subscribe(display_id, self.frame_requests.clone())?;
         self.registration = Some((display_id, subscriber_id));
