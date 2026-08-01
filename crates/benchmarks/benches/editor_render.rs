@@ -124,6 +124,27 @@ fn editor_render(cx: &mut BenchAppContext) {
     });
 }
 
+#[gpui::bench]
+fn editor_noop_notify(cx: &mut BenchAppContext) {
+    init_context(cx);
+
+    let text = "fn main() { println!(\"hello\"); }\n".repeat(1_000);
+    let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
+
+    let mut window = cx.add_empty_window();
+    let editor = window.update(|window, cx| {
+        let editor = window.replace_root(cx, |window, cx| {
+            let mut editor = Editor::new(EditorMode::full(), buffer, None, window, cx);
+            editor.set_style(editor::EditorStyle::default(), window, cx);
+            editor
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+        editor
+    });
+
+    cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
+}
+
 fn init_context(cx: &mut BenchAppContext) {
     cx.update(|cx| {
         let store = SettingsStore::test(cx);
@@ -146,6 +167,7 @@ gpui::bench_group!(
     benches,
     editor_multi_cursor_input,
     open_editor_with_one_long_line,
-    editor_render
+    editor_render,
+    editor_noop_notify
 );
 gpui::bench_main!(benches);
