@@ -2,7 +2,10 @@ use editor::{
     Editor, EditorMode, MultiBuffer,
     actions::{DeleteToPreviousWordStart, SelectAll, SplitSelectionIntoLines},
 };
-use gpui::{AppContext as _, BenchAppContext, Focusable as _};
+use gpui::{
+    AppContext as _, BenchAppContext, Context, Entity, Focusable as _, IntoElement, Render,
+    SharedString, Window, div, prelude::*, px,
+};
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
 use settings::SettingsStore;
 use util::RandomCharIter;
@@ -145,6 +148,84 @@ fn editor_noop_notify(cx: &mut BenchAppContext) {
     cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
 }
 
+#[gpui::bench]
+fn editor_noop_notify_with_static_sibling(cx: &mut BenchAppContext) {
+    benchmark_editor_with_static_sibling(false, cx);
+}
+
+#[gpui::bench]
+fn editor_noop_notify_with_retained_static_sibling(cx: &mut BenchAppContext) {
+    benchmark_editor_with_static_sibling(true, cx);
+}
+
+fn benchmark_editor_with_static_sibling(retain_static_sibling: bool, cx: &mut BenchAppContext) {
+    init_context(cx);
+
+    let text = "fn main() { println!(\"hello\"); }\n".repeat(1_000);
+    let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
+    let rows = (0..1_000)
+        .map(|row| SharedString::from(format!("Static row {row}")))
+        .collect();
+
+    let mut window = cx.add_empty_window();
+    let editor = window.update(|window, cx| {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::new(EditorMode::full(), buffer, None, window, cx);
+            editor.set_style(editor::EditorStyle::default(), window, cx);
+            editor
+        });
+        let static_sibling = cx.new(|_| StaticRows { rows });
+        window.replace_root(cx, |_, _| EditorWithStaticSibling {
+            editor: editor.clone(),
+            static_sibling,
+            retain_static_sibling,
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+        editor
+    });
+
+    cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
+}
+
+struct EditorWithStaticSibling {
+    editor: Entity<Editor>,
+    static_sibling: Entity<StaticRows>,
+    retain_static_sibling: bool,
+}
+
+impl Render for EditorWithStaticSibling {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .child(div().flex_1().h_full().child(self.editor.clone()))
+            .child(
+                div()
+                    .w(px(400.))
+                    .h_full()
+                    .child(if self.retain_static_sibling {
+                        self.static_sibling.clone().retained()
+                    } else {
+                        self.static_sibling.clone().into_element()
+                    }),
+            )
+    }
+}
+
+struct StaticRows {
+    rows: Vec<SharedString>,
+}
+
+impl Render for StaticRows {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().flex_col().children(
+            self.rows
+                .iter()
+                .map(|row| div().h(px(20.)).child(row.clone())),
+        )
+    }
+}
+
 fn init_context(cx: &mut BenchAppContext) {
     cx.update(|cx| {
         let store = SettingsStore::test(cx);
@@ -168,6 +249,8 @@ gpui::bench_group!(
     editor_multi_cursor_input,
     open_editor_with_one_long_line,
     editor_render,
-    editor_noop_notify
+    editor_noop_notify,
+    editor_noop_notify_with_static_sibling,
+    editor_noop_notify_with_retained_static_sibling
 );
 gpui::bench_main!(benches);
