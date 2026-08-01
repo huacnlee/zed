@@ -4597,6 +4597,21 @@ impl Window {
         )
     }
 
+    pub(crate) fn request_retained_layout(&mut self, style: taffy::Style) -> LayoutId {
+        self.invalidator.debug_assert_prepaint();
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .request_retained_layout(style)
+    }
+
+    pub(crate) fn retainable_layout_style(&self, layout_id: LayoutId) -> Option<taffy::Style> {
+        self.layout_engine
+            .as_ref()
+            .unwrap()
+            .retainable_style(layout_id)
+    }
+
     /// Add a node to the layout tree for the current frame. Instead of taking a `Style` and children,
     /// this variant takes a function that is invoked during layout so you can use arbitrary logic to
     /// determine the element's size. One place this is used internally is when measuring text.
