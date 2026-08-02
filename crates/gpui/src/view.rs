@@ -40,16 +40,6 @@ impl AnyView {
         ViewElement::new(self).cached(style)
     }
 
-    /// Reuse this view's rendered subtree while its backing entity is clean.
-    ///
-    /// The view's root must specify both width and height without measuring its
-    /// contents. Views with an intrinsic root size fall back to normal rendering.
-    /// Every state change that affects rendering must ultimately call
-    /// [`Context::notify`] on the backing entity.
-    pub fn retained(self) -> ViewElement<AnyView> {
-        ViewElement::new(self).retained()
-    }
-
     /// Convert this to a weak handle.
     pub fn downgrade(&self) -> AnyWeakView {
         AnyWeakView {
@@ -106,7 +96,7 @@ impl<V: 'static + Render> IntoElement for Entity<V> {
     type Element = ViewElement<Entity<V>>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        ViewElement::new(self).retained()
     }
 }
 
@@ -114,7 +104,7 @@ impl IntoElement for AnyView {
     type Element = ViewElement<AnyView>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        ViewElement::new(self).retained()
     }
 }
 
@@ -236,21 +226,10 @@ impl<T: Render> Entity<T> {
     /// The rendered subtree is reused until the entity is notified (or the
     /// cached bounds / text style change). Caching requires a definite size:
     /// a cached view is laid out from `style` and is *not* measured from its
-    /// contents. Use [`ViewElement::new`] (or `.child(entity)`) for the
-    /// uncached case.
+    /// contents. Use [`ViewElement::new`] for the uncached case.
     #[track_caller]
     pub fn cached(self, style: StyleRefinement) -> ViewElement<Entity<T>> {
         ViewElement::new(self).cached(style)
-    }
-
-    /// Reuse this view's rendered subtree while this entity is clean.
-    ///
-    /// The view's root must specify both width and height without measuring its
-    /// contents. Views with an intrinsic root size fall back to normal rendering.
-    /// Every state change that affects rendering must ultimately call
-    /// [`Context::notify`] on this entity.
-    pub fn retained(self) -> ViewElement<Entity<T>> {
-        ViewElement::new(self).retained()
     }
 }
 
@@ -660,17 +639,13 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
-                .child(
-                    div()
-                        .w(self.child_width)
-                        .child(self.child.clone().retained()),
-                )
+                .child(div().w(self.child_width).child(self.child.clone()))
                 .child(div().size(px(1.)))
         }
     }
 
     #[gpui::test]
-    fn retained_view_reuses_clean_subtree_and_updates_when_invalidated(cx: &mut TestAppContext) {
+    fn entity_view_reuses_clean_subtree_and_updates_when_invalidated(cx: &mut TestAppContext) {
         let render_count = Rc::new(Cell::new(0));
         let observed_width = Rc::new(Cell::new(Pixels::ZERO));
         let nested = cx.new(|_| NestedChild);
@@ -732,7 +707,7 @@ mod tests {
 
     impl Render for IntrinsicParent {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(self.child.clone().retained())
+            div().size_full().child(self.child.clone())
         }
     }
 

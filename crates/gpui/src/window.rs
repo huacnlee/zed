@@ -50,7 +50,7 @@ use std::{
     marker::PhantomData,
     mem,
     ops::{DerefMut, Range},
-    rc::Rc,
+    rc::{Rc, Weak as RcWeak},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
@@ -137,6 +137,39 @@ pub(crate) struct WindowInvalidator {
     inner: Rc<RefCell<WindowInvalidatorInner>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ViewInvalidator {
+    window: RcWeak<RefCell<WindowInvalidatorInner>>,
+    entity: EntityId,
+}
+
+impl Debug for ViewInvalidator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ViewInvalidator")
+            .field("entity", &self.entity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ViewInvalidator {
+    pub(crate) fn invalidate(&self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let mut window = window.borrow_mut();
+        // Mutations made while building the current frame are already reflected in it.
+        // Carrying them forward would keep handles configured during render perpetually dirty.
+        if window.draw_phase != DrawPhase::None {
+            return;
+        }
+        window.update_count += 1;
+        window.dirty_views.insert(self.entity);
+        WindowInvalidator::record_frame_dirty(&mut window);
+        window.dirty = true;
+    }
+}
+
 impl WindowInvalidator {
     pub fn new() -> Self {
         WindowInvalidator {
@@ -161,6 +194,13 @@ impl WindowInvalidator {
             true
         } else {
             false
+        }
+    }
+
+    fn view_invalidator(&self, entity: EntityId) -> ViewInvalidator {
+        ViewInvalidator {
+            window: Rc::downgrade(&self.inner),
+            entity,
         }
     }
 
@@ -2976,7 +3016,7 @@ impl Window {
         mem::swap(&mut entities, entities_ref.deref_mut());
     }
 
-    fn invalidate_entities(&mut self) {
+    pub(crate) fn invalidate_entities(&mut self) {
         let mut views = self.invalidator.take_views();
         for entity in views.drain() {
             self.mark_view_dirty(entity);
@@ -4736,6 +4776,10 @@ impl Window {
     pub fn current_view(&self) -> EntityId {
         self.invalidator.debug_assert_paint_or_prepaint();
         self.rendered_entity_stack.last().copied().unwrap()
+    }
+
+    pub(crate) fn current_view_invalidator(&self) -> ViewInvalidator {
+        self.invalidator.view_invalidator(self.current_view())
     }
 
     #[inline]

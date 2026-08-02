@@ -168,29 +168,15 @@ fn benchmark_editor_update(scroll_editor: bool, cx: &mut BenchAppContext) {
 
 #[gpui::bench]
 fn editor_noop_notify_with_static_sibling(cx: &mut BenchAppContext) {
-    benchmark_editor_with_static_sibling(false, false, cx);
-}
-
-#[gpui::bench]
-fn editor_noop_notify_with_retained_static_sibling(cx: &mut BenchAppContext) {
-    benchmark_editor_with_static_sibling(true, false, cx);
+    benchmark_editor_with_static_sibling(false, cx);
 }
 
 #[gpui::bench]
 fn editor_scroll_with_static_sibling(cx: &mut BenchAppContext) {
-    benchmark_editor_with_static_sibling(false, true, cx);
+    benchmark_editor_with_static_sibling(true, cx);
 }
 
-#[gpui::bench]
-fn editor_scroll_with_retained_static_sibling(cx: &mut BenchAppContext) {
-    benchmark_editor_with_static_sibling(true, true, cx);
-}
-
-fn benchmark_editor_with_static_sibling(
-    retain_static_sibling: bool,
-    scroll_editor: bool,
-    cx: &mut BenchAppContext,
-) {
+fn benchmark_editor_with_static_sibling(scroll_editor: bool, cx: &mut BenchAppContext) {
     init_context(cx);
 
     let text = "fn main() { println!(\"hello\"); }\n".repeat(1_000);
@@ -210,7 +196,6 @@ fn benchmark_editor_with_static_sibling(
         window.replace_root(cx, |_, _| EditorWithStaticSibling {
             editor: editor.clone(),
             static_sibling,
-            retain_static_sibling,
         });
         window.focus(&editor.focus_handle(cx), cx);
         editor
@@ -230,7 +215,6 @@ fn benchmark_editor_with_static_sibling(
 struct EditorWithStaticSibling {
     editor: Entity<Editor>,
     static_sibling: Entity<StaticRows>,
-    retain_static_sibling: bool,
 }
 
 impl Render for EditorWithStaticSibling {
@@ -243,11 +227,7 @@ impl Render for EditorWithStaticSibling {
                 div()
                     .w(px(400.))
                     .h_full()
-                    .child(if self.retain_static_sibling {
-                        self.static_sibling.clone().retained()
-                    } else {
-                        self.static_sibling.clone().into_element()
-                    }),
+                    .child(self.static_sibling.clone()),
             )
     }
 }
@@ -292,8 +272,6 @@ gpui::bench_group!(
     editor_noop_notify,
     editor_scroll,
     editor_noop_notify_with_static_sibling,
-    editor_noop_notify_with_retained_static_sibling,
-    editor_scroll_with_static_sibling,
-    editor_scroll_with_retained_static_sibling
+    editor_scroll_with_static_sibling
 );
 gpui::bench_main!(benches);

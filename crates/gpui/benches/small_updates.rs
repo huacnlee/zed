@@ -123,12 +123,12 @@ fn blink_cursor_beside_cached_rows(row_count: &usize, cx: &mut BenchAppContext) 
     });
 }
 
-#[gpui::bench(inputs = row_counts(), group = "Blink cursor beside retained rows", input_name = "rows")]
-fn blink_cursor_beside_retained_rows(row_count: &usize, cx: &mut BenchAppContext) {
+#[gpui::bench(inputs = row_counts(), group = "Blink cursor beside definite entity rows", input_name = "rows")]
+fn blink_cursor_beside_definite_entity_rows(row_count: &usize, cx: &mut BenchAppContext) {
     let cursor = cx.new(|_| CursorView {
         cursor_visible: true,
     });
-    let rows = cx.new(|_| RetainedRowsView {
+    let rows = cx.new(|_| DefiniteRowsView {
         rows: bench_rows(*row_count),
         height: px(*row_count as f32 * 24.),
     });
@@ -136,7 +136,7 @@ fn blink_cursor_beside_retained_rows(row_count: &usize, cx: &mut BenchAppContext
     window.update(|window, cx| {
         let cursor = cursor.clone();
         let rows = rows.clone();
-        window.replace_root(cx, |_window, _cx| RetainedRowsWithCursor { rows, cursor });
+        window.replace_root(cx, |_window, _cx| EntityRowsWithCursor { rows, cursor });
     });
     cx.bench_renderer(cursor, |cursor, _window, cx| {
         cursor.cursor_visible = !cursor.cursor_visible;
@@ -146,7 +146,7 @@ fn blink_cursor_beside_retained_rows(row_count: &usize, cx: &mut BenchAppContext
 
 #[gpui::bench(inputs = row_counts(), group = "Notify definite rows", input_name = "rows")]
 fn notify_definite_rows(row_count: &usize, cx: &mut BenchAppContext) {
-    let rows = cx.new(|_| RetainedRowsView {
+    let rows = cx.new(|_| DefiniteRowsView {
         rows: bench_rows(*row_count),
         height: px(*row_count as f32 * 24.),
     });
@@ -154,20 +154,6 @@ fn notify_definite_rows(row_count: &usize, cx: &mut BenchAppContext) {
     window.update(|window, cx| {
         let rows = rows.clone();
         window.replace_root(cx, |_window, _cx| DefiniteRows { rows });
-    });
-    cx.bench_renderer(rows, |_rows, _window, cx| cx.notify());
-}
-
-#[gpui::bench(inputs = row_counts(), group = "Notify retained rows", input_name = "rows")]
-fn notify_retained_rows(row_count: &usize, cx: &mut BenchAppContext) {
-    let rows = cx.new(|_| RetainedRowsView {
-        rows: bench_rows(*row_count),
-        height: px(*row_count as f32 * 24.),
-    });
-    let mut window = cx.add_empty_window();
-    window.update(|window, cx| {
-        let rows = rows.clone();
-        window.replace_root(cx, |_window, _cx| RetainedRows { rows });
     });
     cx.bench_renderer(rows, |_rows, _window, cx| cx.notify());
 }
@@ -274,12 +260,12 @@ struct RowsView {
     rows: Vec<SharedString>,
 }
 
-struct RetainedRowsView {
+struct DefiniteRowsView {
     rows: Vec<SharedString>,
     height: gpui::Pixels,
 }
 
-impl Render for RetainedRowsView {
+impl Render for DefiniteRowsView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().w_full().h(self.height).flex_col().children(
             self.rows
@@ -350,13 +336,13 @@ struct EmptyRowsWithCursor {
     cursor: Entity<CursorView>,
 }
 
-struct RetainedRowsWithCursor {
-    rows: Entity<RetainedRowsView>,
+struct EntityRowsWithCursor {
+    rows: Entity<DefiniteRowsView>,
     cursor: Entity<CursorView>,
 }
 
 struct DefiniteRows {
-    rows: Entity<RetainedRowsView>,
+    rows: Entity<DefiniteRowsView>,
 }
 
 impl Render for DefiniteRows {
@@ -365,22 +351,12 @@ impl Render for DefiniteRows {
     }
 }
 
-struct RetainedRows {
-    rows: Entity<RetainedRowsView>,
-}
-
-impl Render for RetainedRows {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.rows.clone().retained()
-    }
-}
-
-impl Render for RetainedRowsWithCursor {
+impl Render for EntityRowsWithCursor {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex_col()
-            .child(self.rows.clone().retained())
+            .child(self.rows.clone())
             .child(self.cursor.clone())
     }
 }
@@ -423,9 +399,8 @@ gpui::bench_group!(
     blink_cursor_in_leaf,
     blink_cursor_beside_rows_entity,
     blink_cursor_beside_cached_rows,
-    blink_cursor_beside_retained_rows,
+    blink_cursor_beside_definite_entity_rows,
     notify_definite_rows,
-    notify_retained_rows,
     blink_cursor_beside_empty_rows,
 );
 gpui::bench_main!(benches);
