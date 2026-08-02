@@ -130,15 +130,27 @@ fn editor_render(cx: &mut BenchAppContext) {
 
 #[gpui::bench]
 fn editor_noop_notify(cx: &mut BenchAppContext) {
-    benchmark_editor_update(false, cx);
+    benchmark_editor_update(EditorUpdate::Notify, cx);
+}
+
+#[gpui::bench]
+fn editor_cursor_blink(cx: &mut BenchAppContext) {
+    benchmark_editor_update(EditorUpdate::CursorBlink, cx);
 }
 
 #[gpui::bench]
 fn editor_scroll(cx: &mut BenchAppContext) {
-    benchmark_editor_update(true, cx);
+    benchmark_editor_update(EditorUpdate::Scroll, cx);
 }
 
-fn benchmark_editor_update(scroll_editor: bool, cx: &mut BenchAppContext) {
+#[derive(Clone, Copy)]
+enum EditorUpdate {
+    Notify,
+    CursorBlink,
+    Scroll,
+}
+
+fn benchmark_editor_update(update: EditorUpdate, cx: &mut BenchAppContext) {
     init_context(cx);
 
     let text = "fn main() { println!(\"hello\"); }\n".repeat(1_000);
@@ -155,15 +167,15 @@ fn benchmark_editor_update(scroll_editor: bool, cx: &mut BenchAppContext) {
         editor
     });
 
-    if scroll_editor {
-        let mut amount = 1.;
-        cx.bench_renderer(editor, move |editor, window, cx| {
-            editor.scroll_screen(&ScrollAmount::Line(amount), window, cx);
-            amount = -amount;
-        });
-    } else {
-        cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
-    }
+    let mut scroll_amount = 1.;
+    cx.bench_renderer(editor, move |editor, window, cx| match update {
+        EditorUpdate::Notify => cx.notify(),
+        EditorUpdate::CursorBlink => editor.toggle_cursor_visibility(cx),
+        EditorUpdate::Scroll => {
+            editor.scroll_screen(&ScrollAmount::Line(scroll_amount), window, cx);
+            scroll_amount = -scroll_amount;
+        }
+    });
 }
 
 #[gpui::bench]
@@ -270,6 +282,7 @@ gpui::bench_group!(
     open_editor_with_one_long_line,
     editor_render,
     editor_noop_notify,
+    editor_cursor_blink,
     editor_scroll,
     editor_noop_notify_with_static_sibling,
     editor_scroll_with_static_sibling
