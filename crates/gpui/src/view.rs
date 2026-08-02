@@ -96,7 +96,7 @@ impl<V: 'static + Render> IntoElement for Entity<V> {
     type Element = ViewElement<Entity<V>>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        ViewElement::new(self).retained()
     }
 }
 
@@ -104,7 +104,7 @@ impl IntoElement for AnyView {
     type Element = ViewElement<AnyView>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        ViewElement::new(self).retained()
     }
 }
 
@@ -226,8 +226,7 @@ impl<T: Render> Entity<T> {
     /// The rendered subtree is reused until the entity is notified (or the
     /// cached bounds / text style change). Caching requires a definite size:
     /// a cached view is laid out from `style` and is *not* measured from its
-    /// contents. Use [`ViewElement::new`] (or `.child(entity)`) for the
-    /// uncached case.
+    /// contents. Use [`ViewElement::new`] for the uncached case.
     #[track_caller]
     pub fn cached(self, style: StyleRefinement) -> ViewElement<Entity<T>> {
         ViewElement::new(self).cached(style)
@@ -240,9 +239,15 @@ impl<T: Render> Entity<T> {
 pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
-    cached_style: Option<StyleRefinement>,
+    cache: ViewCache,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
+}
+
+enum ViewCache {
+    None,
+    Explicit(StyleRefinement),
+    Retained,
 }
 
 impl<V: View> ViewElement<V> {
@@ -252,7 +257,7 @@ impl<V: View> ViewElement<V> {
         let entity_id = view.entity_id();
         ViewElement {
             entity_id,
-            cached_style: None,
+            cache: ViewCache::None,
             view: Some(view),
             #[cfg(debug_assertions)]
             source: core::panic::Location::caller(),
@@ -269,7 +274,12 @@ impl<V: View> ViewElement<V> {
     /// Reach this through [`Entity::cached`] or [`AnyView::cached`], which are
     /// entity-backed by construction.
     pub(crate) fn cached(mut self, style: StyleRefinement) -> Self {
-        self.cached_style = Some(style);
+        self.cache = ViewCache::Explicit(style);
+        self
+    }
+
+    fn retained(mut self) -> Self {
+        self.cache = ViewCache::Retained;
         self
     }
 }
@@ -286,6 +296,13 @@ struct ViewElementState {
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
+    accessed_entities: FxHashSet<EntityId>,
+}
+
+struct RetainedViewLayoutState {
+    style: Option<taffy::Style>,
+    rem_size: Pixels,
+    scale_factor: f32,
     accessed_entities: FxHashSet<EntityId>,
 }
 
@@ -322,13 +339,62 @@ impl<V: View> Element for ViewElement<V> {
             // Stateful path: create a reactive boundary.
             window.with_rendered_view(entity_id, |window| {
                 let caching_disabled = window.is_inspector_picking(cx);
-                match self.cached_style.as_ref() {
-                    Some(style) if !caching_disabled => {
+                match &self.cache {
+                    ViewCache::Explicit(style) if !caching_disabled => {
                         let mut root_style = Style::default();
                         root_style.refine(style);
                         let layout_id = window.request_layout(root_style, None, cx);
                         (layout_id, None)
                     }
+                    ViewCache::Retained if !caching_disabled => window
+                        .with_element_state::<RetainedViewLayoutState, _>(
+                            _id.unwrap(),
+                            |state, window| {
+                                let rem_size = window.rem_size();
+                                let scale_factor = window.scale_factor();
+                                if let Some(state) = state
+                                    && state.rem_size == rem_size
+                                    && state.scale_factor == scale_factor
+                                    && !window.dirty_views.contains(&entity_id)
+                                    && !window.refreshing
+                                {
+                                    if let Some(style) = state.style.clone() {
+                                        return (
+                                            (window.request_retained_layout(style), None),
+                                            state,
+                                        );
+                                    }
+
+                                    let mut element = self
+                                        .view
+                                        .take()
+                                        .unwrap()
+                                        .render(window, cx)
+                                        .into_any_element();
+                                    let layout_id = element.request_layout(window, cx);
+                                    return ((layout_id, Some(element)), state);
+                                }
+
+                                let ((layout_id, element), accessed_entities) = cx
+                                    .detect_accessed_entities(|cx| {
+                                        let mut element = self
+                                            .view
+                                            .take()
+                                            .unwrap()
+                                            .render(window, cx)
+                                            .into_any_element();
+                                        let layout_id = element.request_layout(window, cx);
+                                        (layout_id, element)
+                                    });
+                                let state = RetainedViewLayoutState {
+                                    style: window.retainable_layout_style(layout_id),
+                                    rem_size,
+                                    scale_factor,
+                                    accessed_entities,
+                                };
+                                ((layout_id, Some(element)), state)
+                            },
+                        ),
                     _ => {
                         let mut element = self
                             .view
@@ -372,6 +438,42 @@ impl<V: View> Element for ViewElement<V> {
             // Stateful path.
             window.set_view_id(entity_id);
             window.with_rendered_view(entity_id, |window| {
+                if matches!(self.cache, ViewCache::Retained) && element.is_some() {
+                    let accessed_entities = window
+                        .with_element_state::<RetainedViewLayoutState, _>(
+                            global_id.unwrap(),
+                            |state, _window| {
+                                let mut state = state.unwrap();
+                                let accessed_entities = mem::take(&mut state.accessed_entities);
+                                (accessed_entities, state)
+                            },
+                        );
+                    return window.with_element_state::<ViewElementState, _>(
+                        global_id.unwrap(),
+                        |_element_state, window| {
+                            let mut element = element.take().unwrap();
+                            let prepaint_start = window.prepaint_index();
+                            element.prepaint(window, cx);
+                            let prepaint_end = window.prepaint_index();
+                            let content_mask = window.content_mask();
+                            let text_style = window.text_style();
+                            (
+                                Some(element),
+                                ViewElementState {
+                                    accessed_entities,
+                                    prepaint_range: prepaint_start..prepaint_end,
+                                    paint_range: PaintIndex::default()..PaintIndex::default(),
+                                    cache_key: ViewElementCacheKey {
+                                        bounds,
+                                        content_mask,
+                                        text_style,
+                                    },
+                                },
+                            )
+                        },
+                    );
+                }
+
                 if let Some(mut element) = element.take() {
                     element.prepaint(window, cx);
                     return Some(element);
@@ -459,7 +561,7 @@ impl<V: View> Element for ViewElement<V> {
             // Stateful path.
             window.with_rendered_view(entity_id, |window| {
                 let caching_disabled = window.is_inspector_picking(cx);
-                if self.cached_style.is_some() && !caching_disabled {
+                if !matches!(self.cache, ViewCache::None) && !caching_disabled {
                     window.with_element_state::<ViewElementState, _>(
                         global_id.unwrap(),
                         |element_state, window| {
@@ -503,5 +605,154 @@ pub struct EmptyView;
 impl Render for EmptyView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TestAppContext, canvas, div, prelude::*, px};
+    use std::{cell::Cell, rc::Rc};
+
+    struct RetainedChild {
+        render_count: Rc<Cell<usize>>,
+        observed_width: Rc<Cell<Pixels>>,
+        nested: Entity<NestedChild>,
+    }
+
+    struct NestedChild;
+
+    impl Render for NestedChild {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(1.))
+        }
+    }
+
+    impl Render for RetainedChild {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.render_count.set(self.render_count.get() + 1);
+            let observed_width = self.observed_width.clone();
+            div()
+                .w_full()
+                .h(px(20.))
+                .child(canvas(
+                    move |bounds, _, _| observed_width.set(bounds.size.width),
+                    |_, _, _, _| {},
+                ))
+                .child(self.nested.clone())
+        }
+    }
+
+    struct RetainedParent {
+        child: Entity<RetainedChild>,
+        child_width: Pixels,
+    }
+
+    impl Render for RetainedParent {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().w(self.child_width).child(self.child.clone()))
+                .child(div().size(px(1.)))
+        }
+    }
+
+    #[gpui::test]
+    fn entity_view_reuses_clean_subtree_and_updates_when_invalidated(cx: &mut TestAppContext) {
+        let render_count = Rc::new(Cell::new(0));
+        let observed_width = Rc::new(Cell::new(Pixels::ZERO));
+        let nested = cx.new(|_| NestedChild);
+        let child = cx.new(|_| RetainedChild {
+            render_count: render_count.clone(),
+            observed_width: observed_width.clone(),
+            nested: nested.clone(),
+        });
+        let (parent, cx) = cx.add_window_view({
+            let child = child.clone();
+            |_, _| RetainedParent {
+                child,
+                child_width: px(100.),
+            }
+        });
+
+        assert_eq!(render_count.get(), 1);
+        assert_eq!(observed_width.get(), px(100.));
+
+        parent.update(cx, |_parent, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 1);
+
+        nested.update(cx, |_nested, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 2);
+
+        cx.update(|window, _cx| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 3);
+
+        child.update(cx, |_child, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 4);
+
+        parent.update(cx, |parent, cx| {
+            parent.child_width = px(200.);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 5);
+        assert_eq!(observed_width.get(), px(200.));
+    }
+
+    struct IntrinsicChild {
+        render_count: Rc<Cell<usize>>,
+        definite: bool,
+    }
+
+    impl Render for IntrinsicChild {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.render_count.set(self.render_count.get() + 1);
+            div()
+                .when(self.definite, |this| this.size(px(100.)))
+                .child("intrinsic size")
+        }
+    }
+
+    struct IntrinsicParent {
+        child: Entity<IntrinsicChild>,
+    }
+
+    impl Render for IntrinsicParent {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.child.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn retained_view_falls_back_when_root_size_depends_on_contents(cx: &mut TestAppContext) {
+        let render_count = Rc::new(Cell::new(0));
+        let child = cx.new(|_| IntrinsicChild {
+            render_count: render_count.clone(),
+            definite: false,
+        });
+        let (parent, cx) = cx.add_window_view({
+            let child = child.clone();
+            |_, _| IntrinsicParent { child }
+        });
+
+        assert_eq!(render_count.get(), 1);
+        parent.update(cx, |_parent, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 2);
+
+        child.update(cx, |child, cx| {
+            child.definite = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 3);
+
+        parent.update(cx, |_parent, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 3);
     }
 }

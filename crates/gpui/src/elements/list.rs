@@ -11,7 +11,7 @@ use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
     Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Window, point, px, size,
+    ViewInvalidator, Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -60,6 +60,7 @@ impl std::fmt::Debug for ListState {
 }
 
 struct StateInner {
+    view_invalidator: Option<ViewInvalidator>,
     last_layout_bounds: Option<Bounds<Pixels>>,
     last_padding: Option<Edges<Pixels>>,
     items: SumTree<ListItem>,
@@ -73,6 +74,14 @@ struct StateInner {
     measuring_behavior: ListMeasuringBehavior,
     pending_scroll: Option<PendingScroll>,
     follow_state: FollowState,
+}
+
+impl StateInner {
+    fn invalidate_view(&self) {
+        if let Some(invalidator) = &self.view_invalidator {
+            invalidator.invalidate();
+        }
+    }
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -313,6 +322,7 @@ impl ListState {
     /// that the list doesn't flicker or pop in when scrolling.
     pub fn new(item_count: usize, alignment: ListAlignment, overdraw: Pixels) -> Self {
         let this = Self(Rc::new(RefCell::new(StateInner {
+            view_invalidator: None,
             last_layout_bounds: None,
             last_padding: None,
             items: SumTree::default(),
@@ -391,6 +401,7 @@ impl ListState {
         let mut tree = SumTree::default();
         tree.extend(new_items, ());
         state.items = tree;
+        state.invalidate_view();
     }
 
     /// Remeasure all items while preserving proportional scroll position.
@@ -472,6 +483,7 @@ impl ListState {
         };
         state.items = new_items;
         state.measuring_behavior.reset();
+        state.invalidate_view();
     }
 
     /// The number of items in this list.
@@ -546,6 +558,7 @@ impl ListState {
                 *item_ix = *item_ix - (old_range.end - old_range.start) + spliced_count;
             }
         }
+        state.invalidate_view();
     }
 
     /// Set a handler that will be called when the list is scrolled.
@@ -553,7 +566,9 @@ impl ListState {
         &self,
         handler: impl FnMut(&ListScrollEvent, &mut Window, &mut App) + 'static,
     ) {
-        self.0.borrow_mut().scroll_handler = Some(Box::new(handler))
+        let state = &mut *self.0.borrow_mut();
+        state.scroll_handler = Some(Box::new(handler));
+        state.invalidate_view();
     }
 
     /// Get the current scroll offset, in terms of the list's items.
@@ -568,7 +583,7 @@ impl ListState {
         }
 
         let current_offset = self.logical_scroll_top();
-        let state = &mut *self.0.borrow_mut();
+        let mut state = self.0.borrow_mut();
 
         if distance < px(0.) {
             state.follow_state.stop_following();
@@ -592,6 +607,7 @@ impl ListState {
         drop(cursor);
         state.rebase_pending_scroll(scroll_top);
         state.logical_scroll_top = Some(scroll_top);
+        state.invalidate_view();
     }
 
     /// Scroll the list to the very end (past the last item).
@@ -601,13 +617,14 @@ impl ListState {
     /// always show the bottom of the last item — even when that item is still
     /// growing (e.g. during streaming).
     pub fn scroll_to_end(&self) {
-        let state = &mut *self.0.borrow_mut();
+        let mut state = self.0.borrow_mut();
         let item_count = state.items.summary().count;
         state.pending_scroll = None;
         state.logical_scroll_top = Some(ListOffset {
             item_ix: item_count,
             offset_in_item: px(0.),
         });
+        state.invalidate_view();
     }
 
     /// Set the follow mode for the list. In `Tail` mode, the list
@@ -632,6 +649,7 @@ impl ListState {
                 }
             }
         }
+        state.invalidate_view();
     }
 
     /// Returns whether the list is currently actively following the
@@ -645,7 +663,7 @@ impl ListState {
 
     /// Scroll the list to the given offset
     pub fn scroll_to(&self, mut scroll_top: ListOffset) {
-        let state = &mut *self.0.borrow_mut();
+        let mut state = self.0.borrow_mut();
         let item_count = state.items.summary().count;
         if scroll_top.item_ix >= item_count {
             scroll_top.item_ix = item_count;
@@ -658,11 +676,12 @@ impl ListState {
 
         state.rebase_pending_scroll(scroll_top);
         state.logical_scroll_top = Some(scroll_top);
+        state.invalidate_view();
     }
 
     /// Scroll the list to the given item, such that the item is fully visible.
     pub fn scroll_to_reveal_item(&self, ix: usize) {
-        let state = &mut *self.0.borrow_mut();
+        let mut state = self.0.borrow_mut();
 
         let mut scroll_top = state.logical_scroll_top();
         let height = state
@@ -691,6 +710,7 @@ impl ListState {
 
         state.rebase_pending_scroll(scroll_top);
         state.logical_scroll_top = Some(scroll_top);
+        state.invalidate_view();
     }
 
     /// Get the bounds for the given item in window coordinates, if it's
@@ -730,13 +750,16 @@ impl ListState {
     pub fn scrollbar_drag_started(&self) {
         let mut state = self.0.borrow_mut();
         state.scrollbar_drag_start_height = Some(state.items.summary().height);
+        state.invalidate_view();
     }
 
     /// Called when the user stops dragging the scrollbar.
     ///
     /// See `scrollbar_drag_started`.
     pub fn scrollbar_drag_ended(&self) {
-        self.0.borrow_mut().scrollbar_drag_start_height.take();
+        let state = &mut *self.0.borrow_mut();
+        state.scrollbar_drag_start_height.take();
+        state.invalidate_view();
     }
 
     /// Returns `true` if the scrollbar is currently being dragged.
@@ -751,7 +774,9 @@ impl ListState {
 
     /// Set the offset from the scrollbar
     pub fn set_offset_from_scrollbar(&self, point: Point<Pixels>) {
-        self.0.borrow_mut().set_offset_from_scrollbar(point);
+        let state = &mut *self.0.borrow_mut();
+        state.set_offset_from_scrollbar(point);
+        state.invalidate_view();
     }
 
     /// Returns the maximum scroll offset according to the items we have measured.
@@ -943,6 +968,9 @@ impl StateInner {
             );
         }
 
+        if let Some(invalidator) = &self.view_invalidator {
+            invalidator.invalidate();
+        }
         cx.notify(current_view);
     }
 
@@ -1519,6 +1547,7 @@ impl Element for List {
         window: &mut Window,
         cx: &mut App,
     ) -> ListPrepaintState {
+        self.state.0.borrow_mut().view_invalidator = Some(window.current_view_invalidator());
         let state = &mut *self.state.0.borrow_mut();
         state.reset = false;
 

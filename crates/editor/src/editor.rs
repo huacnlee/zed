@@ -9479,6 +9479,12 @@ impl Editor {
             && self.focus_handle.is_focused(window)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn toggle_cursor_visibility(&mut self, cx: &mut Context<Self>) {
+        self.blink_manager
+            .update(cx, BlinkManager::toggle_cursor_visibility);
+    }
+
     pub fn set_show_cursor_when_unfocused(&mut self, is_enabled: bool, cx: &mut Context<Self>) {
         self.show_cursor_when_unfocused = is_enabled;
         cx.notify();
