@@ -357,9 +357,22 @@ impl<V: View> Element for ViewElement<V> {
                                     && state.scale_factor == scale_factor
                                     && !window.dirty_views.contains(&entity_id)
                                     && !window.refreshing
-                                    && let Some(style) = state.style.clone()
                                 {
-                                    return ((window.request_retained_layout(style), None), state);
+                                    if let Some(style) = state.style.clone() {
+                                        return (
+                                            (window.request_retained_layout(style), None),
+                                            state,
+                                        );
+                                    }
+
+                                    let mut element = self
+                                        .view
+                                        .take()
+                                        .unwrap()
+                                        .render(window, cx)
+                                        .into_any_element();
+                                    let layout_id = element.request_layout(window, cx);
+                                    return ((layout_id, Some(element)), state);
                                 }
 
                                 let ((layout_id, element), accessed_entities) = cx
@@ -692,12 +705,15 @@ mod tests {
 
     struct IntrinsicChild {
         render_count: Rc<Cell<usize>>,
+        definite: bool,
     }
 
     impl Render for IntrinsicChild {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             self.render_count.set(self.render_count.get() + 1);
-            div().child("intrinsic size")
+            div()
+                .when(self.definite, |this| this.size(px(100.)))
+                .child("intrinsic size")
         }
     }
 
@@ -716,12 +732,27 @@ mod tests {
         let render_count = Rc::new(Cell::new(0));
         let child = cx.new(|_| IntrinsicChild {
             render_count: render_count.clone(),
+            definite: false,
         });
-        let (parent, cx) = cx.add_window_view(|_, _| IntrinsicParent { child });
+        let (parent, cx) = cx.add_window_view({
+            let child = child.clone();
+            |_, _| IntrinsicParent { child }
+        });
 
         assert_eq!(render_count.get(), 1);
         parent.update(cx, |_parent, cx| cx.notify());
         cx.run_until_parked();
         assert_eq!(render_count.get(), 2);
+
+        child.update(cx, |child, cx| {
+            child.definite = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 3);
+
+        parent.update(cx, |_parent, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(render_count.get(), 3);
     }
 }
