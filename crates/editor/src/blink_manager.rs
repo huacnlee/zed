@@ -113,6 +113,12 @@ impl BlinkManager {
         self.visible
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn toggle_cursor_visibility(&mut self, cx: &mut Context<Self>) {
+        self.visible = !self.visible;
+        cx.notify();
+    }
+
     #[cfg(test)]
     pub(crate) fn enabled(&self) -> bool {
         self.enabled

@@ -85,6 +85,18 @@ impl TaffyLayoutEngine {
         }
     }
 
+    pub fn request_retained_layout(&mut self, style: taffy::Style) -> LayoutId {
+        self.taffy.new_leaf(style).expect(EXPECT_MESSAGE).into()
+    }
+
+    pub fn retainable_style(&self, id: LayoutId) -> Option<taffy::Style> {
+        let style = self.taffy.style(id.into()).expect(EXPECT_MESSAGE);
+        if style.size.width.is_auto() || style.size.height.is_auto() {
+            return None;
+        }
+        Some(style.clone())
+    }
+
     pub fn request_measured_layout(
         &mut self,
         style: Style,

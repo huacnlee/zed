@@ -23,8 +23,8 @@ use crate::{
     LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
     MouseMoveEvent, MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow, ParentElement,
     PinchEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
-    size,
+    StyleRefinement, Styled, Task, TooltipId, ViewInvalidator, Visibility, Window,
+    WindowControlArea, point, px, size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -2334,6 +2334,7 @@ impl Interactivity {
                 .as_ref()
                 .map(|handle| handle.0.borrow_mut());
             if let Some(mut scroll_handle_state) = tracked_scroll_handle.as_deref_mut() {
+                scroll_handle_state.view_invalidator = Some(window.current_view_invalidator());
                 scroll_handle_state.overflow = style.overflow;
                 scroll_to_bottom = mem::take(&mut scroll_handle_state.scroll_to_bottom);
             }
@@ -4018,6 +4019,7 @@ impl ScrollAnchor {
 
 #[derive(Default, Debug)]
 struct ScrollHandleState {
+    view_invalidator: Option<ViewInvalidator>,
     offset: Rc<RefCell<Point<Pixels>>>,
     ongoing_scroll: Rc<RefCell<OngoingScroll>>,
     bounds: Bounds<Pixels>,
@@ -4054,6 +4056,13 @@ impl Default for ScrollHandle {
 }
 
 impl ScrollHandle {
+    pub(crate) fn invalidate_view(&self) {
+        let invalidator = self.0.borrow().view_invalidator.clone();
+        if let Some(invalidator) = invalidator {
+            invalidator.invalidate();
+        }
+    }
+
     /// Construct a new scroll handle.
     pub fn new() -> Self {
         Self(Rc::default())
@@ -4124,6 +4133,8 @@ impl ScrollHandle {
             index: ix,
             strategy: ScrollStrategy::default(),
         });
+        drop(state);
+        self.invalidate_view();
     }
 
     /// Update [ScrollHandleState]'s active item for scrolling to in prepaint
@@ -4134,6 +4145,8 @@ impl ScrollHandle {
             index: ix,
             strategy: ScrollStrategy::Top,
         });
+        drop(state);
+        self.invalidate_view();
     }
 
     /// Scrolls the minimal amount to either ensure that the child is
@@ -4191,6 +4204,8 @@ impl ScrollHandle {
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
         state.scroll_to_bottom = true;
+        drop(state);
+        self.invalidate_view();
     }
 
     /// Set the offset explicitly. The offset is the distance from the top left of the
@@ -4199,6 +4214,8 @@ impl ScrollHandle {
     pub fn set_offset(&self, mut position: Point<Pixels>) {
         let state = self.0.borrow();
         *state.offset.borrow_mut() = position;
+        drop(state);
+        self.invalidate_view();
     }
 
     /// Get the logical scroll top, based on a child index and a pixel offset.

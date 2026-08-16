@@ -718,6 +718,14 @@ pub struct FrameTiming {
     pub draw_start: Instant,
     /// When `Window::draw` finished.
     pub draw_end: Instant,
+    /// Time spent building, laying out, and prepainting root elements.
+    pub prepaint_duration: Duration,
+    /// Time spent requesting layout for the root element tree.
+    pub request_layout_duration: Duration,
+    /// Time spent computing root layout bounds.
+    pub layout_duration: Duration,
+    /// Time spent painting root elements into the scene.
+    pub paint_duration: Duration,
 }
 
 impl FrameTiming {
