@@ -15,6 +15,7 @@
 //! and Tailwind-like styling that you can use to build your own custom elements. Div is
 //! constructed by combining these two systems into an all-in-one element.
 
+use crate::retained::{Damage, EnvironmentDiff, Isolation, RetainableElement};
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
     Display, Element, ElementId, Entity, EntityId, ExternalDragPayload, ExternalDragPayloadSource,
@@ -1805,6 +1806,10 @@ pub struct Div {
 }
 
 impl Div {
+    fn retained_properties_with_style(&self, style: Style) -> InteractivityRetainedProperties {
+        self.interactivity.retained_properties(style)
+    }
+
     /// Add a listener to be called when the children of this `Div` are prepainted.
     /// This allows you to store the [`Bounds`] of the children for later use.
     pub fn on_children_prepainted(
@@ -1884,12 +1889,169 @@ impl ParentElement for Div {
     }
 }
 
+pub(crate) struct InteractivityRetainedProperties {
+    style: Style,
+    hitbox_behavior: HitboxBehavior,
+    focusable: bool,
+    focus: Option<crate::FocusId>,
+    key_context: Option<KeyContext>,
+    tab_stop: bool,
+    tab_index: Option<isize>,
+    tab_group: bool,
+    window_control: Option<WindowControlArea>,
+}
+
+impl InteractivityRetainedProperties {
+    pub(crate) fn diff(previous: &Self, current: &Self, environment: &EnvironmentDiff) -> Damage {
+        let mut damage = current.style.retained_damage(&previous.style);
+        if environment.metrics || environment.text_layout {
+            damage |= Damage::LAYOUT | Damage::PREPAINT | Damage::PAINT;
+        }
+        if environment.text_paint || environment.composite {
+            damage |= Damage::PAINT;
+        }
+        if previous.hitbox_behavior != current.hitbox_behavior
+            || previous.focusable != current.focusable
+            || previous.focus != current.focus
+            || previous.key_context != current.key_context
+            || previous.tab_stop != current.tab_stop
+            || previous.tab_index != current.tab_index
+            || previous.tab_group != current.tab_group
+            || previous.window_control != current.window_control
+        {
+            damage |= Damage::PREPAINT | Damage::HANDLERS;
+        }
+        damage
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.style.box_shadow.capacity() * size_of::<crate::BoxShadow>()
+    }
+}
+
+impl RetainableElement for Div {
+    type RetainedProperties = InteractivityRetainedProperties;
+
+    fn retained_properties(&self) -> Self::RetainedProperties {
+        let mut style = Style::default();
+        style.refine(&self.interactivity.base_style);
+        self.retained_properties_with_style(style)
+    }
+
+    fn diff(
+        previous: &Self::RetainedProperties,
+        current: &Self::RetainedProperties,
+        environment: &EnvironmentDiff,
+    ) -> Damage {
+        InteractivityRetainedProperties::diff(previous, current, environment)
+    }
+
+    fn property_heap_bytes(properties: &Self::RetainedProperties) -> usize {
+        properties.heap_bytes()
+    }
+}
+
 impl Element for Div {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = DivFrameState;
     type PrepaintState = Option<Hitbox>;
 
+    fn try_reuse_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(LayoutId, Self::RequestLayoutState)> {
+        if !self.children.is_empty() || self.image_cache.is_some() {
+            return None;
+        }
+        let style = self.interactivity.retained_layout_style(cx)?;
+        let layout = window.reuse_leaf_layout(&style)?;
+        if window.retains_element_properties() {
+            window.reconcile_retained_property_value::<Self>(
+                self.retained_properties_with_style(style),
+                Isolation::empty(),
+                cx,
+            );
+        }
+        Some((
+            layout,
+            DivFrameState {
+                child_layout_ids: SmallVec::new(),
+            },
+        ))
+    }
+
     fn id(&self) -> Option<ElementId> {
         self.interactivity.element_id.clone()
+    }
+
+    fn try_reuse_prepaint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Self::PrepaintState> {
+        let interactivity = &mut self.interactivity;
+        if !self.children.is_empty()
+            || self.image_cache.is_some()
+            || self.prepaint_listener.is_some()
+            || self.prepaint_order_fn.is_some()
+            || cx.has_active_drag()
+            || interactivity.tracked_focus_handle.is_some()
+            || interactivity.tracked_scroll_handle.is_some()
+            || interactivity.scroll_anchor.is_some()
+            || interactivity.scroll_offset.is_some()
+            || interactivity.report_active_descendant_focus
+            || interactivity.hover_style.is_some()
+            || interactivity.group_hover_style.is_some()
+        {
+            return None;
+        }
+
+        window.with_optional_element_state::<InteractiveElementState, _>(
+            global_id,
+            |element_state, window| {
+                let mut element_state =
+                    element_state.map(|element_state| element_state.unwrap_or_default());
+                // A tooltip from an earlier interactive incarnation must still be retired
+                // by the full path, even when the current element no longer has a builder.
+                if element_state
+                    .as_ref()
+                    .is_some_and(|state| state.active_tooltip.is_some())
+                {
+                    return (None, element_state);
+                }
+                let style =
+                    interactivity.compute_style_internal(None, element_state.as_mut(), window, cx);
+                let hitbox = if interactivity.should_insert_hitbox(&style, window, cx) {
+                    let hitbox = window.with_content_mask(
+                        style.overflow_mask(bounds, window.rem_size()),
+                        |window| {
+                            window.reuse_retained_hitbox(bounds, interactivity.hitbox_behavior)
+                        },
+                    );
+                    let Some(hitbox) = hitbox else {
+                        return (None, element_state);
+                    };
+                    Some(hitbox)
+                } else {
+                    None
+                };
+                if let Some(clicked_state) = element_state
+                    .as_ref()
+                    .and_then(|state| state.clicked_state.as_ref())
+                {
+                    interactivity.active = Some(clicked_state.borrow().element);
+                }
+                interactivity.content_size = bounds.size;
+                (Some(hitbox), element_state)
+            },
+        )
     }
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
@@ -1927,6 +2089,7 @@ impl Element for Div {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut child_layout_ids = SmallVec::new();
+        let mut retained_style = None;
         let image_cache = self
             .image_cache
             .as_mut()
@@ -1939,6 +2102,9 @@ impl Element for Div {
                 window,
                 cx,
                 |style, window, cx| {
+                    if window.retains_element_properties() {
+                        retained_style = Some(style.clone());
+                    }
                     window.with_text_style(style.text_style().cloned(), |window| {
                         child_layout_ids = self
                             .children
@@ -1951,6 +2117,13 @@ impl Element for Div {
             )
         });
 
+        if let Some(style) = retained_style {
+            window.reconcile_retained_property_value::<Self>(
+                self.retained_properties_with_style(style),
+                Isolation::empty(),
+                cx,
+            );
+        }
         (layout_id, DivFrameState { child_layout_ids })
     }
 
@@ -2199,6 +2372,51 @@ pub struct Interactivity {
 }
 
 impl Interactivity {
+    pub(crate) fn retained_layout_style(&self, cx: &App) -> Option<Style> {
+        if cx.has_active_drag()
+            || self.focusable
+            || self.tracked_focus_handle.is_some()
+            || self.tracked_scroll_handle.is_some()
+            || self.scroll_offset.is_some()
+            || self.focus_style.is_some()
+            || self.in_focus_style.is_some()
+            || self.focus_visible_style.is_some()
+            || self.hover_style.is_some()
+            || self.group_hover_style.is_some()
+            || self.active_style.is_some()
+            || self.group_active_style.is_some()
+            || self
+                .base_style
+                .overflow
+                .x
+                .is_some_and(|overflow| overflow != Overflow::Visible)
+            || self
+                .base_style
+                .overflow
+                .y
+                .is_some_and(|overflow| overflow != Overflow::Visible)
+        {
+            return None;
+        }
+        let mut style = Style::default();
+        style.refine(&self.base_style);
+        Some(style)
+    }
+
+    pub(crate) fn retained_properties(&self, style: Style) -> InteractivityRetainedProperties {
+        InteractivityRetainedProperties {
+            style,
+            hitbox_behavior: self.hitbox_behavior,
+            focusable: self.focusable,
+            focus: self.tracked_focus_handle.as_ref().map(|handle| handle.id),
+            key_context: self.key_context.clone(),
+            tab_stop: self.tab_stop,
+            tab_index: self.tab_index,
+            tab_group: self.tab_group,
+            window_control: self.window_control,
+        }
+    }
+
     /// Layout this element according to this interactivity state's configured styles
     pub fn request_layout(
         &mut self,
@@ -2382,14 +2600,16 @@ impl Interactivity {
                         style.overflow_mask(bounds, window.rem_size()),
                         |window| {
                             let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+                                Some(window.insert_retained_hitbox(bounds, self.hitbox_behavior))
                             } else {
                                 None
                             };
 
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
-                            let result = f(&style, scroll_offset, hitbox, window, cx);
+                            let result = window.with_element_opacity(style.opacity, |window| {
+                                f(&style, scroll_offset, hitbox, window, cx)
+                            });
                             (result, element_state)
                         },
                     )
@@ -2580,6 +2800,10 @@ impl Interactivity {
                                                 );
                                             }
 
+                                            let previous_target = window
+                                                .retained_tree
+                                                .handler_target
+                                                .replace(hitbox.id);
                                             self.paint_mouse_listeners(
                                                 hitbox,
                                                 element_state.as_mut(),
@@ -2587,6 +2811,7 @@ impl Interactivity {
                                                 cx,
                                             );
                                             self.paint_scroll_listener(hitbox, &style, window, cx);
+                                            window.retained_tree.handler_target = previous_target;
                                         }
 
                                         self.paint_keyboard_listeners(window, cx);
@@ -4091,6 +4316,9 @@ impl<E> Element for Stateful<E>
 where
     E: Element,
 {
+    fn uses_retained_diff(&self) -> bool {
+        self.element.uses_retained_diff()
+    }
     type RequestLayoutState = E::RequestLayoutState;
     type PrepaintState = E::PrepaintState;
 
@@ -4126,6 +4354,27 @@ where
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         self.element.request_layout(id, inspector_id, window, cx)
+    }
+
+    fn try_reuse_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(LayoutId, Self::RequestLayoutState)> {
+        self.element.try_reuse_layout(id, window, cx)
+    }
+
+    fn try_reuse_prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Self::PrepaintState> {
+        self.element
+            .try_reuse_prepaint(id, bounds, state, window, cx)
     }
 
     fn prepaint(
@@ -4434,6 +4683,34 @@ impl ScrollHandle {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_div_interactivity_changes_preserve_layout() {
+        use super::*;
+
+        let environment = EnvironmentDiff {
+            metrics: false,
+            text_layout: false,
+            text_paint: false,
+            composite: false,
+        };
+        let previous = div().retained_properties();
+        let changes: [fn(&mut Interactivity); 5] = [
+            |interactivity| interactivity.hitbox_behavior = HitboxBehavior::BlockMouse,
+            |interactivity| interactivity.focusable = true,
+            |interactivity| interactivity.tab_stop = true,
+            |interactivity| interactivity.tab_index = Some(2),
+            |interactivity| interactivity.window_control = Some(WindowControlArea::Drag),
+        ];
+        for change in changes {
+            let mut current = div();
+            change(&mut current.interactivity);
+            assert_eq!(
+                Div::diff(&previous, &current.retained_properties(), &environment),
+                Damage::PREPAINT | Damage::HANDLERS
+            );
+        }
+    }
+
     use super::*;
     use crate::{
         AnyWindowHandle, AppContext as _, Context, GestureTuning, InputEvent, Keystroke,

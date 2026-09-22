@@ -33,6 +33,7 @@
 
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::InspectorElementPath;
+use crate::retained::{Damage, RetainedNodeId};
 use crate::{
     A11ySubtreeBuilder, App, ArenaBox, AvailableSpace, Bounds, Context, DispatchNodeId, ElementId,
     FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size, Style, Window,
@@ -40,7 +41,7 @@ use crate::{
 };
 use derive_more::{Deref, DerefMut};
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     fmt::{self, Debug, Display},
     mem, panic,
     sync::Arc,
@@ -70,6 +71,26 @@ pub trait Element: 'static + IntoElement {
     /// inspector and navigate to their source code.
     fn source_location(&self) -> Option<&'static panic::Location<'static>>;
 
+    /// Internal opt-in for elements whose phase hooks classify retained damage.
+    /// Custom elements default to full layout, prepaint, handler, and paint invalidation.
+    #[doc(hidden)]
+    fn uses_retained_diff(&self) -> bool {
+        false
+    }
+
+    /// Restores current-frame layout state from a validated persistent layout, if supported.
+    /// The default preserves the full request-layout path for custom elements. Implementations
+    /// must account for all layout inputs and initialize the state consumed by later phases.
+    #[doc(hidden)]
+    fn try_reuse_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<(LayoutId, Self::RequestLayoutState)> {
+        None
+    }
+
     /// Before an element can be painted, we need to know where it's going to be and how big it is.
     /// Use this method to request a layout from Taffy and initialize the element's state.
     fn request_layout(
@@ -79,6 +100,21 @@ pub trait Element: 'static + IntoElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState);
+
+    /// Restores prepaint state without rebuilding this element's prepaint output, if supported.
+    /// Implementations must validate current inputs and preserve all frame-local effects.
+    /// Returning `None` keeps custom elements on the full prepaint path.
+    #[doc(hidden)]
+    fn try_reuse_prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Self::PrepaintState> {
+        None
+    }
 
     /// After laying out an element, we need to commit its bounds to the current frame for hitbox
     /// purposes. The state argument is the same state that was returned from [`Element::request_layout()`].
@@ -257,6 +293,7 @@ pub struct Drawable<E: Element> {
     /// The drawn element.
     pub element: E,
     phase: ElementDrawPhase<E::RequestLayoutState, E::PrepaintState>,
+    retained_node: Option<RetainedNodeId>,
 }
 
 #[derive(Default)]
@@ -293,12 +330,23 @@ impl<E: Element> Drawable<E> {
         Drawable {
             element,
             phase: ElementDrawPhase::Start,
+            retained_node: None,
         }
     }
 
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         match mem::take(&mut self.phase) {
             ElementDrawPhase::Start => {
+                self.retained_node = window
+                    .retained_tree
+                    .begin_element(self.element.id(), TypeId::of::<E>());
+                let retained_parent = window.retained_tree.enter(self.retained_node);
+                let retained_diff = self.element.uses_retained_diff();
+                if !retained_diff {
+                    window.retained_tree.damage_current(
+                        Damage::LAYOUT | Damage::PREPAINT | Damage::HANDLERS | Damage::PAINT,
+                    );
+                }
                 let global_id = self
                     .element
                     .id()
@@ -320,12 +368,35 @@ impl<E: Element> Drawable<E> {
                     inspector_id = None;
                 }
 
-                let (layout_id, request_layout) = self.element.request_layout(
-                    global_id.as_ref(),
-                    inspector_id.as_ref(),
-                    window,
-                    cx,
-                );
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                {
+                    let owner = window.rendered_entity_stack.last().copied();
+                    window.retained_tree.bind_inspector(
+                        inspector_id.as_ref(),
+                        std::any::type_name::<E>(),
+                        owner,
+                    );
+                }
+
+                let reused = (retained_diff && window.can_reuse_retained_layout())
+                    .then(|| {
+                        self.element
+                            .try_reuse_layout(global_id.as_ref(), window, cx)
+                    })
+                    .flatten();
+                let (layout_id, request_layout) = if let Some(reused) = reused {
+                    window.retained_tree.stats.layout_reused += 1;
+                    reused
+                } else {
+                    window.retained_tree.stats.layout_recomputed += 1;
+                    self.element.request_layout(
+                        global_id.as_ref(),
+                        inspector_id.as_ref(),
+                        window,
+                        cx,
+                    )
+                };
+                window.retained_tree.enter(retained_parent);
 
                 if global_id.is_some() {
                     window.element_id_stack.pop();
@@ -403,14 +474,34 @@ impl<E: Element> Drawable<E> {
                 }
 
                 let node_id = window.next_frame.dispatch_tree.push_node();
-                let mut prepaint = self.element.prepaint(
-                    global_id.as_ref(),
-                    inspector_id.as_ref(),
-                    bounds,
-                    &mut request_layout,
-                    window,
-                    cx,
-                );
+                let retained_parent = window.retained_tree.enter(self.retained_node);
+                let reused = (self.element.uses_retained_diff()
+                    && window.can_reuse_retained_prepaint())
+                .then(|| {
+                    self.element.try_reuse_prepaint(
+                        global_id.as_ref(),
+                        bounds,
+                        &mut request_layout,
+                        window,
+                        cx,
+                    )
+                })
+                .flatten();
+                let mut prepaint = if let Some(prepaint) = reused {
+                    window.retained_tree.stats.prepaint_reused += 1;
+                    prepaint
+                } else {
+                    window.retained_tree.stats.prepaint_rebuilt += 1;
+                    self.element.prepaint(
+                        global_id.as_ref(),
+                        inspector_id.as_ref(),
+                        bounds,
+                        &mut request_layout,
+                        window,
+                        cx,
+                    )
+                };
+                window.retained_tree.enter(retained_parent);
                 window.next_frame.dispatch_tree.pop_node();
 
                 if pushed_a11y_node {
@@ -477,6 +568,12 @@ impl<E: Element> Drawable<E> {
                 }
 
                 window.next_frame.dispatch_tree.set_active_node(node_id);
+                let handler_dispatch_target = window
+                    .retained_tree
+                    .handler_dispatch_target
+                    .replace(node_id);
+                let retained_parent = window.retained_tree.enter(self.retained_node);
+                window.retained_tree.stats.paint_rebuilt += 1;
                 self.element.paint(
                     global_id.as_ref(),
                     inspector_id.as_ref(),
@@ -486,6 +583,9 @@ impl<E: Element> Drawable<E> {
                     window,
                     cx,
                 );
+                window.retained_tree.finish_handlers();
+                window.retained_tree.handler_dispatch_target = handler_dispatch_target;
+                window.retained_tree.enter(retained_parent);
 
                 if global_id.is_some() {
                     window.element_id_stack.pop();
@@ -640,6 +740,19 @@ impl AnyElement {
         self.0.layout_as_root(available_space, window, cx)
     }
 
+    pub(crate) fn measure(
+        mut self,
+        available_space: Size<AvailableSpace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels> {
+        // A discarded measurement probe must not claim the identity of the displayed row.
+        let retained_active = window.retained_tree.suspend();
+        let size = self.layout_as_root(available_space, window, cx);
+        window.retained_tree.resume(retained_active);
+        size
+    }
+
     /// Prepaints this element at the given absolute origin.
     /// If any element in the subtree beneath this element is focused, its FocusHandle is returned.
     pub fn prepaint_at(
@@ -666,6 +779,9 @@ impl AnyElement {
 }
 
 impl Element for AnyElement {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = ();
     type PrepaintState = ();
 
@@ -738,6 +854,9 @@ impl IntoElement for Empty {
 }
 
 impl Element for Empty {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = ();
     type PrepaintState = ();
 

@@ -2,8 +2,8 @@ use anyhow::{Context as _, Result};
 use derive_more::{Deref, DerefMut};
 use etagere::BucketedAtlasAllocator;
 use gpui::{
-    AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasBackend, AtlasGeneration, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind,
+    AtlasTextureList, AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
 use metal::Device;
 use parking_lot::Mutex;
@@ -34,6 +34,10 @@ struct MetalAtlasTextures {
 }
 
 impl PlatformAtlas for MetalAtlas {
+    fn generation(&self) -> Option<AtlasGeneration> {
+        self.0.lock().generation()
+    }
+
     fn get_or_insert_with<'a>(
         &self,
         key: AtlasKey,

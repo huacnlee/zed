@@ -9,8 +9,8 @@ use windows::Win32::Graphics::{
 };
 
 use gpui::{
-    AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasBackend, AtlasGeneration, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind,
+    AtlasTextureList, AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
 
 pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
@@ -69,6 +69,10 @@ impl DirectXAtlas {
 }
 
 impl PlatformAtlas for DirectXAtlas {
+    fn generation(&self) -> Option<AtlasGeneration> {
+        self.0.lock().generation()
+    }
+
     fn get_or_insert_with<'a>(
         &self,
         key: AtlasKey,

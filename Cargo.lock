@@ -7704,6 +7704,7 @@ dependencies = [
  "gpui_macos",
  "gpui_web",
  "gpui_windows",
+ "image",
 ]
 
 [[package]]

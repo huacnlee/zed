@@ -1424,6 +1424,12 @@ impl From<RenderImageParams> for AtlasKey {
 
 #[expect(missing_docs)]
 pub trait PlatformAtlas {
+    /// An atlas-wide resource epoch. Implementations must change this on removal,
+    /// reset, or device recovery. `None` disables retained sprite replay.
+    fn generation(&self) -> Option<AtlasGeneration> {
+        None
+    }
+
     /// The builder runs with the atlas locked and must not re-enter the same atlas.
     fn get_or_insert_with<'a>(
         &self,
@@ -1435,6 +1441,25 @@ pub trait PlatformAtlas {
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
         false
+    }
+}
+
+/// Identifies the lifetime of atlas resources across atlas instances and resets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AtlasGeneration(u64);
+
+impl AtlasGeneration {
+    /// Creates a globally unique resource token. Exhaustion returns `None`,
+    /// which keeps retained resource replay disabled instead of reusing a token.
+    pub fn fresh() -> Option<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+        NEXT_GENERATION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
+                generation.checked_add(1)
+            })
+            .ok()
+            .map(Self)
     }
 }
 
@@ -1453,13 +1478,20 @@ pub trait AtlasBackend {
 #[doc(hidden)]
 pub struct AtlasState<Backend> {
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    generation: Option<AtlasGeneration>,
     pub backend: Backend,
 }
 
 impl<Backend> AtlasState<Backend> {
+    /// Returns the current resource lifetime token.
+    pub fn generation(&self) -> Option<AtlasGeneration> {
+        self.generation
+    }
+
     pub fn new(backend: Backend) -> Self {
         Self {
             tiles_by_key: FxHashMap::default(),
+            generation: AtlasGeneration::fresh(),
             backend,
         }
     }
@@ -1469,6 +1501,7 @@ impl<Backend> AtlasState<Backend> {
     }
 
     pub fn clear(&mut self, reset_backend: impl FnOnce(&mut Backend)) {
+        self.generation = AtlasGeneration::fresh();
         self.tiles_by_key.clear();
         reset_backend(&mut self.backend);
     }
@@ -1504,6 +1537,7 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
 
     pub fn remove(&mut self, key: &AtlasKey) {
         if let Some(tile) = self.tiles_by_key.remove(key) {
+            self.generation = AtlasGeneration::fresh();
             self.backend.remove(tile);
         }
     }
@@ -1550,6 +1584,10 @@ impl AtlasBackend for HeadlessAtlasBackend {
 }
 
 impl PlatformAtlas for HeadlessAtlas {
+    fn generation(&self) -> Option<AtlasGeneration> {
+        self.0.lock().generation()
+    }
+
     fn get_or_insert_with<'a>(
         &self,
         key: AtlasKey,
@@ -3208,6 +3246,24 @@ mod atlas_tests {
 
     fn build_tile() -> Result<Option<(Size<DevicePixels>, Cow<'static, [u8]>)>> {
         Ok(Some((TILE_SIZE, Cow::Borrowed(&[0, 0, 0, 255]))))
+    }
+
+    #[test]
+    fn atlas_generation_changes_only_when_resources_are_invalidated() -> Result<()> {
+        let mut state = AtlasState::new(RecordingAtlasBackend::default());
+        let initial = state.generation().expect("supported generation");
+        let other = AtlasState::new(RecordingAtlasBackend::default());
+        assert_ne!(Some(initial), other.generation());
+        state.get_or_insert_with(image_key(1), &mut build_tile)?;
+        assert_eq!(state.generation(), Some(initial));
+        state.remove(&image_key(2));
+        assert_eq!(state.generation(), Some(initial));
+        state.remove(&image_key(1));
+        let removed = state.generation().expect("new generation");
+        assert_ne!(removed, initial);
+        state.clear(|_| {});
+        assert_ne!(state.generation(), Some(removed));
+        Ok(())
     }
 
     #[test]

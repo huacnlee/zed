@@ -49,6 +49,7 @@
 //!
 //!  KeyBinding::new("cmd-k left", pane::SplitLeft, Some("Pane"))
 
+use crate::retained::{HandlerSlotId, SlottedHandler};
 use crate::{
     Action, ActionRegistry, App, DispatchPhase, EntityId, FocusId, KeyBinding, KeyContext, Keymap,
     Keystroke, ModifiersChangedEvent, Window,
@@ -58,7 +59,6 @@ use smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
-    mem,
     ops::Range,
     rc::Rc,
 };
@@ -81,9 +81,9 @@ pub(crate) struct DispatchTree {
 
 #[derive(Default)]
 pub(crate) struct DispatchNode {
-    pub key_listeners: Vec<KeyListener>,
+    pub key_listeners: Vec<SlottedHandler<KeyListener>>,
     pub action_listeners: Vec<DispatchActionListener>,
-    pub modifiers_changed_listeners: Vec<ModifiersChangedListener>,
+    pub modifiers_changed_listeners: Vec<SlottedHandler<ModifiersChangedListener>>,
     pub context: Option<KeyContext>,
     pub focus_id: Option<FocusId>,
     view_id: Option<EntityId>,
@@ -94,6 +94,7 @@ pub(crate) struct ReusedSubtree {
     old_range: Range<usize>,
     new_range: Range<usize>,
     contains_focus: bool,
+    pub handlers_replayed: usize,
 }
 
 impl ReusedSubtree {
@@ -132,6 +133,7 @@ type ModifiersChangedListener = Rc<dyn Fn(&ModifiersChangedEvent, &mut Window, &
 
 #[derive(Clone)]
 pub(crate) struct DispatchActionListener {
+    pub(crate) slot: Option<HandlerSlotId>,
     pub(crate) action_type: TypeId,
     pub(crate) listener: Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App)>,
 }
@@ -243,7 +245,7 @@ impl DispatchTree {
         self.node_stack.pop();
     }
 
-    fn move_node(&mut self, source: &mut DispatchNode) {
+    fn copy_node(&mut self, source: &DispatchNode) {
         self.push_node();
         if let Some(context) = source.context.clone() {
             self.set_key_context(context);
@@ -256,24 +258,29 @@ impl DispatchTree {
         }
 
         let target = self.active_node();
-        target.key_listeners = mem::take(&mut source.key_listeners);
-        target.action_listeners = mem::take(&mut source.action_listeners);
-        target.modifiers_changed_listeners = mem::take(&mut source.modifiers_changed_listeners);
+        // A prepaint attempt can roll back and replay the same source again.
+        // Callbacks are shared so the committed frame remains intact until swap.
+        target.key_listeners.clone_from(&source.key_listeners);
+        target.action_listeners.clone_from(&source.action_listeners);
+        target
+            .modifiers_changed_listeners
+            .clone_from(&source.modifiers_changed_listeners);
     }
 
     pub fn reuse_subtree(
         &mut self,
         old_range: Range<usize>,
-        source: &mut Self,
+        source: &Self,
         focus: Option<FocusId>,
     ) -> ReusedSubtree {
         let new_range = self.nodes.len()..self.nodes.len() + old_range.len();
 
         let mut contains_focus = false;
+        let mut handlers_replayed = 0;
         let mut source_stack = vec![];
         for (source_node_id, source_node) in source
             .nodes
-            .iter_mut()
+            .iter()
             .enumerate()
             .skip(old_range.start)
             .take(old_range.len())
@@ -292,7 +299,22 @@ impl DispatchTree {
             if source_node.focus_id.is_some() && source_node.focus_id == focus {
                 contains_focus = true;
             }
-            self.move_node(source_node);
+            handlers_replayed += source_node
+                .key_listeners
+                .iter()
+                .filter(|handler| handler.slot.is_some())
+                .count()
+                + source_node
+                    .action_listeners
+                    .iter()
+                    .filter(|handler| handler.slot.is_some())
+                    .count()
+                + source_node
+                    .modifiers_changed_listeners
+                    .iter()
+                    .filter(|handler| handler.slot.is_some())
+                    .count();
+            self.copy_node(source_node);
         }
 
         while !source_stack.is_empty() {
@@ -304,6 +326,7 @@ impl DispatchTree {
             old_range,
             new_range,
             contains_focus,
+            handlers_replayed,
         }
     }
 
@@ -320,24 +343,32 @@ impl DispatchTree {
         self.nodes.truncate(index);
     }
 
-    pub fn on_key_event(&mut self, listener: KeyListener) {
-        self.active_node().key_listeners.push(listener);
+    pub fn on_key_event(&mut self, slot: Option<HandlerSlotId>, listener: KeyListener) {
+        self.active_node()
+            .key_listeners
+            .push(SlottedHandler { slot, listener });
     }
 
-    pub fn on_modifiers_changed(&mut self, listener: ModifiersChangedListener) {
+    pub fn on_modifiers_changed(
+        &mut self,
+        slot: Option<HandlerSlotId>,
+        listener: ModifiersChangedListener,
+    ) {
         self.active_node()
             .modifiers_changed_listeners
-            .push(listener);
+            .push(SlottedHandler { slot, listener });
     }
 
     pub fn on_action(
         &mut self,
+        slot: Option<HandlerSlotId>,
         action_type: TypeId,
         listener: Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App)>,
     ) {
         self.active_node()
             .action_listeners
             .push(DispatchActionListener {
+                slot,
                 action_type,
                 listener,
             });
@@ -648,6 +679,29 @@ mod tests {
             Rc::new(RefCell::new(Keymap::new(bindings))),
             Rc::new(registry),
         )
+    }
+
+    #[test]
+    fn replay_retry_preserves_dispatch_callbacks() {
+        let mut source = test_dispatch_tree(Vec::new());
+        let source_node = source.push_node();
+        source.on_key_event(None, Rc::new(|_, _, _, _| {}));
+        source.on_modifiers_changed(None, Rc::new(|_, _, _| {}));
+        source.on_action(
+            None,
+            std::any::TypeId::of::<TestAction>(),
+            Rc::new(|_, _, _, _| {}),
+        );
+        source.pop_node();
+        let mut target = test_dispatch_tree(Vec::new());
+        for _ in 0..2 {
+            target.reuse_subtree(0..1, &source, None);
+            let node = target.node(source_node);
+            assert_eq!(node.key_listeners.len(), 1);
+            assert_eq!(node.action_listeners.len(), 1);
+            assert_eq!(node.modifiers_changed_listeners.len(), 1);
+            target.truncate(0);
+        }
     }
 
     struct PendingInputTestView {

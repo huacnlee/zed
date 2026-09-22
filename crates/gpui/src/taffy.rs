@@ -7,12 +7,12 @@ use crate::{
     },
 };
 use collections::{FxHashMap, FxHashSet};
-use std::{fmt::Debug, ops::Range};
+use std::{any::Any, fmt::Debug, ops::Range};
 use taffy::{
     TaffyTree, TraversePartialTree as _,
     geometry::{Point as TaffyPoint, Rect as TaffyRect, Size as TaffySize},
     prelude::{max_content, min_content},
-    style::AvailableSpace as TaffyAvailableSpace,
+    style::{AvailableSpace as TaffyAvailableSpace, Style as TaffyStyle},
     tree::NodeId,
 };
 
@@ -25,8 +25,25 @@ type MeasureFn =
     dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>;
 type NodeMeasureFn = StackSafe<Box<MeasureFn>>;
 
-struct NodeContext {
-    measure: NodeMeasureFn,
+/// Inputs must be owned; retaining frame-arena elements would outlive their storage.
+pub(crate) trait RetainedMeasure: Any {
+    fn measure(
+        &mut self,
+        known_dimensions: Size<Option<Pixels>>,
+        available_space: Size<AvailableSpace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels>;
+    /// Return true only after validating all inputs and restoring current output handles.
+    /// Taffy may skip measurement entirely when this succeeds.
+    fn reuse(&mut self, previous: &dyn RetainedMeasure) -> bool;
+    /// Discard constraint-dependent output before revisiting a dirty layout root.
+    fn reset(&mut self);
+}
+
+enum NodeContext {
+    Transient(NodeMeasureFn),
+    Retained(Box<dyn RetainedMeasure>),
 }
 pub struct TaffyLayoutEngine {
     taffy: TaffyTree<NodeContext>,
@@ -35,6 +52,10 @@ pub struct TaffyLayoutEngine {
     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
     computed_layouts: FxHashSet<LayoutId>,
     layout_bounds_scratch_space: Vec<LayoutId>,
+    allocated_nodes: FxHashSet<LayoutId>,
+    root_styles: FxHashMap<LayoutId, TaffyStyle>,
+    last_constraints: FxHashMap<LayoutId, Size<AvailableSpace>>,
+    retained_measurements: FxHashSet<LayoutId>,
 }
 
 const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
@@ -49,11 +70,19 @@ impl TaffyLayoutEngine {
             absolute_outer_origins: FxHashMap::default(),
             computed_layouts: FxHashSet::default(),
             layout_bounds_scratch_space: Vec::new(),
+            allocated_nodes: FxHashSet::default(),
+            root_styles: FxHashMap::default(),
+            last_constraints: FxHashMap::default(),
+            retained_measurements: FxHashSet::default(),
         }
     }
 
     pub fn clear(&mut self) {
         self.taffy.clear();
+        self.allocated_nodes.clear();
+        self.root_styles.clear();
+        self.last_constraints.clear();
+        self.retained_measurements.clear();
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();
         self.computed_layouts.clear();
@@ -68,7 +97,7 @@ impl TaffyLayoutEngine {
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        if children.is_empty() {
+        let id = if children.is_empty() {
             self.taffy
                 .new_leaf(taffy_style)
                 .expect(EXPECT_MESSAGE)
@@ -79,7 +108,99 @@ impl TaffyLayoutEngine {
                 .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
                 .expect(EXPECT_MESSAGE)
                 .into()
+        };
+        self.allocated_nodes.insert(id);
+        id
+    }
+
+    pub(crate) fn matches_leaf_layout(
+        &self,
+        id: LayoutId,
+        style: &Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+    ) -> bool {
+        if !self.allocated_nodes.contains(&id) || self.taffy.child_count(id.into()) != 0 {
+            return false;
         }
+        self.taffy.get_node_context(id.into()).is_none()
+            && self
+                .root_styles
+                .get(&id)
+                .or_else(|| self.taffy.style(id.into()).ok())
+                .is_some_and(|previous| *previous == style.to_taffy(rem_size, scale_factor))
+    }
+
+    pub(crate) fn request_retained_layout(
+        &mut self,
+        previous: Option<LayoutId>,
+        style: Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+        children: &[LayoutId],
+    ) -> LayoutId {
+        if let Some(id) = previous.filter(|id| self.allocated_nodes.contains(id)) {
+            let mut update = || -> anyhow::Result<()> {
+                let next_style = style.to_taffy(rem_size, scale_factor);
+                let previous_style = self
+                    .root_styles
+                    .get(&id)
+                    .unwrap_or(self.taffy.style(id.into())?);
+                if previous_style != &next_style {
+                    if let Some(root_style) = self.root_styles.get_mut(&id) {
+                        *root_style = next_style.clone();
+                    }
+                    self.taffy.set_style(id.into(), next_style)?;
+                }
+                if self.taffy.children(id.into())? != LayoutId::to_taffy_slice(children) {
+                    self.taffy
+                        .set_children(id.into(), LayoutId::to_taffy_slice(children))?;
+                }
+                Ok(())
+            };
+            match update() {
+                Ok(()) => return id,
+                Err(error) => log::error!("failed to update retained layout {id:?}: {error:#}"),
+            }
+        }
+        self.request_layout(style, rem_size, scale_factor, children)
+    }
+
+    pub(crate) fn layout_is_dirty(&self, id: LayoutId) -> bool {
+        self.taffy.dirty(id.into()).unwrap_or(true)
+    }
+
+    pub(crate) fn finish_retained_frame(&mut self, retained: impl Iterator<Item = LayoutId>) {
+        let retained: FxHashSet<_> = retained.collect();
+        self.allocated_nodes.retain(|id| {
+            if retained.contains(id) {
+                return true;
+            }
+            // Taffy's remove does not clear its context map or dirty the old parent.
+            if self.taffy.get_node_context((*id).into()).is_some() {
+                if let Err(error) = self.taffy.set_node_context((*id).into(), None) {
+                    log::error!("failed to release layout measurement {id:?}: {error}");
+                }
+            }
+            if let Some(parent) = self.taffy.parent((*id).into()) {
+                if let Err(error) = self.taffy.mark_dirty(parent) {
+                    log::error!("failed to invalidate removed layout parent: {error}");
+                }
+            }
+            if let Err(error) = self.taffy.remove((*id).into()) {
+                log::error!("failed to remove retained layout {id:?}: {error}");
+            }
+            false
+        });
+        self.root_styles
+            .retain(|id, _| self.allocated_nodes.contains(id));
+        self.last_constraints
+            .retain(|id, _| self.allocated_nodes.contains(id));
+        self.retained_measurements
+            .retain(|id| self.allocated_nodes.contains(id));
+        self.absolute_layout_bounds.clear();
+        self.absolute_outer_origins.clear();
+        self.computed_layouts.clear();
     }
 
     pub fn request_measured_layout(
@@ -100,10 +221,38 @@ impl TaffyLayoutEngine {
         #[cfg(feature = "stacker")]
         let measure = StackSafe::new(measure);
 
-        self.taffy
-            .new_leaf_with_context(taffy_style, NodeContext { measure })
+        let id = self
+            .taffy
+            .new_leaf_with_context(taffy_style, NodeContext::Transient(measure))
             .expect(EXPECT_MESSAGE)
-            .into()
+            .into();
+        self.allocated_nodes.insert(id);
+        id
+    }
+
+    pub(crate) fn request_retained_measured_layout(
+        &mut self,
+        previous: Option<LayoutId>,
+        style: Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+        mut measure: impl RetainedMeasure,
+        force: bool,
+    ) -> LayoutId {
+        let id = self.request_retained_layout(previous, style, rem_size, scale_factor, &[]);
+        self.retained_measurements.insert(id);
+        if !force
+            && let Some(context) = self.taffy.get_node_context_mut(id.into())
+            && let NodeContext::Retained(previous) = context
+            && measure.reuse(previous.as_ref())
+        {
+            *context = NodeContext::Retained(Box::new(measure));
+            return id;
+        }
+        self.taffy
+            .set_node_context(id.into(), Some(NodeContext::Retained(Box::new(measure))))
+            .expect(EXPECT_MESSAGE);
+        id
     }
 
     /// Treats any `auto` dimension of the given node's style as filling `size`.
@@ -118,7 +267,12 @@ impl TaffyLayoutEngine {
         size: Size<Pixels>,
         scale_factor: f32,
     ) {
-        let style = self.taffy.style(id.0).expect(EXPECT_MESSAGE);
+        // Preserve authored auto dimensions separately from the viewport-constrained style.
+        // Otherwise reconciliation restores auto and dirties an unchanged root every frame.
+        let style = self
+            .root_styles
+            .entry(id)
+            .or_insert_with(|| self.taffy.style(id.0).expect(EXPECT_MESSAGE).clone());
         let stretch_width = style.size.width.is_auto();
         let stretch_height = style.size.height.is_auto();
         if !stretch_width && !stretch_height {
@@ -133,7 +287,9 @@ impl TaffyLayoutEngine {
             style.size.height =
                 taffy::style::Dimension::length(round_to_device_pixel(size.height.0, scale_factor));
         }
-        self.taffy.set_style(id.0, style).expect(EXPECT_MESSAGE);
+        if self.taffy.style(id.0).expect(EXPECT_MESSAGE) != &style {
+            self.taffy.set_style(id.0, style).expect(EXPECT_MESSAGE);
+        }
     }
 
     // Used to understand performance
@@ -232,6 +388,32 @@ impl TaffyLayoutEngine {
             transform(available_space.height),
         );
 
+        let constraints_changed =
+            self.last_constraints.insert(id, available_space) != Some(available_space);
+        if !self.retained_measurements.is_empty()
+            && (constraints_changed || self.taffy.dirty(id.into()).expect(EXPECT_MESSAGE))
+        {
+            // Taffy's size cache does not restore a measured element's paint state.
+            // A changed root can revisit an older constraint, so its measured leaves
+            // must run again instead of retaining output for a different wrap width.
+            let mut pending = vec![id];
+            while let Some(node) = pending.pop() {
+                pending.extend(
+                    self.taffy
+                        .children(node.into())
+                        .expect(EXPECT_MESSAGE)
+                        .into_iter()
+                        .map(LayoutId::from),
+                );
+                if let Some(NodeContext::Retained(measure)) =
+                    self.taffy.get_node_context_mut(node.into())
+                {
+                    measure.reset();
+                    self.taffy.mark_dirty(node.into()).expect(EXPECT_MESSAGE);
+                }
+            }
+        }
+
         self.taffy
             .compute_layout_with_measure(
                 id.into(),
@@ -259,8 +441,15 @@ impl TaffyLayoutEngine {
                         untransform(available_space.height),
                     );
 
-                    let measured_size: Size<Pixels> =
-                        (node_context.measure)(known_dimensions, available_space, window, cx);
+                    window.retained_tree.stats.measure_recomputed += 1;
+                    let measured_size = match node_context {
+                        NodeContext::Transient(measure) => {
+                            measure(known_dimensions, available_space, window, cx)
+                        }
+                        NodeContext::Retained(measure) => {
+                            measure.measure(known_dimensions, available_space, window, cx)
+                        }
+                    };
                     snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
                 },
             )
@@ -745,6 +934,201 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taffy::prelude::TaffyMaxContent;
+
+    #[test]
+    fn retained_layout_preserves_ids_and_reclaims_transient_nodes() {
+        let mut engine = TaffyLayoutEngine::new();
+        let child = engine.request_retained_layout(None, Style::default(), Pixels(16.), 1., &[]);
+        let parent =
+            engine.request_retained_layout(None, Style::default(), Pixels(16.), 1., &[child]);
+        let transient =
+            engine.request_measured_layout(Style::default(), Pixels(16.), 1., |_, _, _, _| {
+                Size::default()
+            });
+        engine.finish_retained_frame([child, parent].into_iter());
+        assert_eq!(engine.allocated_nodes.len(), 2);
+        assert!(!engine.allocated_nodes.contains(&transient));
+        assert_eq!(
+            engine.request_retained_layout(Some(child), Style::default(), Pixels(16.), 1., &[]),
+            child
+        );
+        assert_eq!(
+            engine.request_retained_layout(
+                Some(parent),
+                Style::default(),
+                Pixels(16.),
+                1.,
+                &[child]
+            ),
+            parent
+        );
+        engine.finish_retained_frame([parent].into_iter());
+        assert_eq!(engine.allocated_nodes.len(), 1);
+        let replacement =
+            engine.request_retained_layout(Some(child), Style::default(), Pixels(16.), 1., &[]);
+        assert_ne!(child, replacement);
+    }
+
+    #[test]
+    fn retained_layout_visual_changes_leave_taffy_clean() {
+        let mut engine = TaffyLayoutEngine::new();
+        let layout = engine.request_retained_layout(None, Style::default(), Pixels(16.), 1., &[]);
+        engine
+            .taffy
+            .compute_layout(
+                layout.into(),
+                TaffySize {
+                    width: TaffyAvailableSpace::MaxContent,
+                    height: TaffyAvailableSpace::MaxContent,
+                },
+            )
+            .expect("valid layout");
+        assert!(!engine.taffy.dirty(layout.into()).expect("valid layout"));
+        let mut style = Style::default();
+        style.background = Some(crate::rgb(0xff0000).into());
+        assert_eq!(
+            engine.request_retained_layout(Some(layout), style, Pixels(16.), 1., &[]),
+            layout
+        );
+        assert!(!engine.taffy.dirty(layout.into()).expect("valid layout"));
+    }
+
+    #[test]
+    fn retained_root_stretch_stays_clean_and_tracks_viewport_size() {
+        let mut engine = TaffyLayoutEngine::new();
+        let layout = engine.request_retained_layout(None, Style::default(), Pixels(16.), 1., &[]);
+        engine.stretch_auto_size_to_fill(layout, size(Pixels(100.), Pixels(80.)), 1.);
+        engine
+            .taffy
+            .compute_layout(layout.into(), TaffySize::MAX_CONTENT)
+            .expect("valid layout");
+        assert!(!engine.taffy.dirty(layout.into()).expect("valid layout"));
+        assert_eq!(
+            engine.request_retained_layout(Some(layout), Style::default(), Pixels(16.), 1., &[]),
+            layout
+        );
+        engine.stretch_auto_size_to_fill(layout, size(Pixels(100.), Pixels(80.)), 1.);
+        assert!(
+            !engine
+                .taffy
+                .dirty(layout.into())
+                .expect("unchanged root stays clean")
+        );
+        assert!(engine.matches_leaf_layout(layout, &Style::default(), Pixels(16.), 1.));
+        engine.stretch_auto_size_to_fill(layout, size(Pixels(120.), Pixels(90.)), 1.);
+        assert!(
+            engine
+                .taffy
+                .dirty(layout.into())
+                .expect("resized root is invalidated")
+        );
+        engine
+            .taffy
+            .compute_layout(layout.into(), TaffySize::MAX_CONTENT)
+            .expect("valid layout");
+        assert_eq!(
+            engine
+                .taffy
+                .layout(layout.into())
+                .expect("valid layout")
+                .size,
+            TaffySize {
+                width: 120.,
+                height: 90.
+            }
+        );
+        let mut explicit = Style::default();
+        explicit.size.width = Pixels(42.).into();
+        engine.request_retained_layout(Some(layout), explicit, Pixels(16.), 1., &[]);
+        engine.stretch_auto_size_to_fill(layout, size(Pixels(140.), Pixels(90.)), 1.);
+        engine
+            .taffy
+            .compute_layout(layout.into(), TaffySize::MAX_CONTENT)
+            .expect("valid layout");
+        assert_eq!(
+            engine
+                .taffy
+                .layout(layout.into())
+                .expect("valid layout")
+                .size,
+            TaffySize {
+                width: 42.,
+                height: 90.
+            }
+        );
+    }
+
+    #[test]
+    fn retained_frame_releases_measurements_and_invalidates_removed_children() {
+        let mut engine = TaffyLayoutEngine::new();
+        let lifetime = std::rc::Rc::new(());
+        let child = engine.request_measured_layout(Style::default(), Pixels(16.), 1., {
+            let lifetime = lifetime.clone();
+            move |_, _, _, _| {
+                assert_eq!(std::rc::Rc::strong_count(&lifetime), 2);
+                Size::default()
+            }
+        });
+        let parent = engine.request_layout(Style::default(), Pixels(16.), 1., &[child]);
+        engine
+            .taffy
+            .compute_layout(
+                parent.into(),
+                TaffySize {
+                    width: TaffyAvailableSpace::MaxContent,
+                    height: TaffyAvailableSpace::MaxContent,
+                },
+            )
+            .expect("valid layout");
+        assert!(!engine.taffy.dirty(parent.into()).expect("valid layout"));
+        engine.finish_retained_frame([parent].into_iter());
+        assert_eq!(std::rc::Rc::strong_count(&lifetime), 1);
+        assert!(engine.taffy.dirty(parent.into()).expect("valid layout"));
+        assert!(
+            engine
+                .taffy
+                .children(parent.into())
+                .expect("valid layout")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn removing_retained_measurement_releases_owned_state() {
+        struct OwnedMeasure(std::rc::Rc<()>);
+        impl RetainedMeasure for OwnedMeasure {
+            fn measure(
+                &mut self,
+                _: Size<Option<Pixels>>,
+                _: Size<AvailableSpace>,
+                _: &mut Window,
+                _: &mut App,
+            ) -> Size<Pixels> {
+                assert!(std::rc::Rc::strong_count(&self.0) > 1);
+                Size::default()
+            }
+            fn reuse(&mut self, _: &dyn RetainedMeasure) -> bool {
+                false
+            }
+            fn reset(&mut self) {}
+        }
+        let mut engine = TaffyLayoutEngine::new();
+        let lifetime = std::rc::Rc::new(());
+        let layout = engine.request_retained_measured_layout(
+            None,
+            Style::default(),
+            Pixels(16.),
+            1.,
+            OwnedMeasure(lifetime.clone()),
+            false,
+        );
+        engine.finish_retained_frame([layout].into_iter());
+        assert_eq!(std::rc::Rc::strong_count(&lifetime), 2);
+        engine.finish_retained_frame(std::iter::empty());
+        assert_eq!(std::rc::Rc::strong_count(&lifetime), 1);
+        assert!(engine.retained_measurements.is_empty());
+    }
 
     #[test]
     fn border_widths_to_taffy_use_stroke_snapping() {

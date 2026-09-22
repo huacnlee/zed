@@ -13,6 +13,44 @@ pub enum TruncateFrom {
     Middle,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) enum RunTruncation {
+    #[default]
+    None,
+    Edge {
+        result_len: usize,
+        affix_len: usize,
+        from: TruncateFrom,
+    },
+    Middle {
+        front_end: usize,
+        back_start: usize,
+        affix_len: usize,
+    },
+}
+
+impl RunTruncation {
+    pub(crate) fn apply(self, runs: &mut Vec<TextRun>) {
+        match self {
+            Self::None => {}
+            Self::Edge {
+                result_len,
+                affix_len,
+                from,
+            } => {
+                update_runs_after_truncation(result_len, affix_len, runs, from);
+            }
+            Self::Middle {
+                front_end,
+                back_start,
+                affix_len,
+            } => {
+                update_runs_after_middle_truncation(affix_len, runs, front_end, back_start);
+            }
+        }
+    }
+}
+
 /// The GPUI line wrapper, used to wrap lines of text to a given width.
 pub struct LineWrapper {
     text_system: Arc<TextSystem>,
@@ -20,6 +58,7 @@ pub struct LineWrapper {
     pub(crate) font_size: Pixels,
     cached_ascii_char_widths: [Option<Pixels>; 128],
     cached_other_char_widths: HashMap<char, Pixels>,
+    pub(crate) run_truncation: RunTruncation,
 }
 
 impl LineWrapper {
@@ -33,6 +72,7 @@ impl LineWrapper {
             font_size,
             cached_ascii_char_widths: [None; 128],
             cached_other_char_widths: HashMap::default(),
+            run_truncation: RunTruncation::None,
         }
     }
 
@@ -253,6 +293,7 @@ impl LineWrapper {
         runs: &'a [TextRun],
         truncate_from: TruncateFrom,
     ) -> (SharedString, Cow<'a, [TextRun]>) {
+        self.run_truncation = RunTruncation::None;
         if truncate_from == TruncateFrom::Middle {
             if let Some((front_end_ix, back_start_ix)) =
                 self.should_truncate_line_middle(&line, truncate_width, truncation_affix)
@@ -263,12 +304,12 @@ impl LineWrapper {
                     &line[back_start_ix..]
                 ));
                 let mut runs = runs.to_vec();
-                update_runs_after_middle_truncation(
-                    truncation_affix,
-                    &mut runs,
-                    front_end_ix,
-                    back_start_ix,
-                );
+                self.run_truncation = RunTruncation::Middle {
+                    front_end: front_end_ix,
+                    back_start: back_start_ix,
+                    affix_len: truncation_affix.len(),
+                };
+                self.run_truncation.apply(&mut runs);
                 return (result, Cow::Owned(runs));
             } else {
                 return (line, Cow::Borrowed(runs));
@@ -291,7 +332,12 @@ impl LineWrapper {
                 TruncateFrom::Middle => unreachable!("Middle truncation is handled above"),
             };
             let mut runs = runs.to_vec();
-            update_runs_after_truncation(&result, truncation_affix, &mut runs, truncate_from);
+            self.run_truncation = RunTruncation::Edge {
+                result_len: result.len(),
+                affix_len: truncation_affix.len(),
+                from: truncate_from,
+            };
+            self.run_truncation.apply(&mut runs);
             (result, Cow::Owned(runs))
         } else {
             (line, Cow::Borrowed(runs))
@@ -316,6 +362,7 @@ impl LineWrapper {
         runs: &'a [TextRun],
         truncate_from: TruncateFrom,
     ) -> (SharedString, Cow<'a, [TextRun]>) {
+        self.run_truncation = RunTruncation::None;
         if max_lines <= 1 || truncate_from == TruncateFrom::Start {
             return self.truncate_line(
                 text,
@@ -353,12 +400,12 @@ impl LineWrapper {
                         .trim_end_matches(|c: char| c.is_whitespace() || c.is_ascii_punctuation());
                     let result = SharedString::from(format!("{truncated}{truncation_affix}"));
                     let mut runs = runs.to_vec();
-                    update_runs_after_truncation(
-                        &result,
-                        truncation_affix,
-                        &mut runs,
-                        TruncateFrom::End,
-                    );
+                    self.run_truncation = RunTruncation::Edge {
+                        result_len: result.len(),
+                        affix_len: truncation_affix.len(),
+                        from: TruncateFrom::End,
+                    };
+                    self.run_truncation.apply(&mut runs);
                     return (result, Cow::Owned(runs));
                 }
 
@@ -428,12 +475,12 @@ impl LineWrapper {
                         .trim_end_matches(|c: char| c.is_whitespace() || c.is_ascii_punctuation());
                     let result = SharedString::from(format!("{truncated}{truncation_affix}"));
                     let mut runs = runs.to_vec();
-                    update_runs_after_truncation(
-                        &result,
-                        truncation_affix,
-                        &mut runs,
-                        TruncateFrom::End,
-                    );
+                    self.run_truncation = RunTruncation::Edge {
+                        result_len: result.len(),
+                        affix_len: truncation_affix.len(),
+                        from: TruncateFrom::End,
+                    };
+                    self.run_truncation.apply(&mut runs);
                     return (result, Cow::Owned(runs));
                 }
             }
@@ -514,19 +561,19 @@ impl LineWrapper {
 }
 
 fn update_runs_after_truncation(
-    result: &str,
-    ellipsis: &str,
+    result_len: usize,
+    affix_len: usize,
     runs: &mut Vec<TextRun>,
     truncate_from: TruncateFrom,
 ) {
-    let mut truncate_at = result.len() - ellipsis.len();
+    let mut truncate_at = result_len - affix_len;
     match truncate_from {
         TruncateFrom::Start => {
             for (run_index, run) in runs.iter_mut().enumerate().rev() {
                 if run.len <= truncate_at {
                     truncate_at -= run.len;
                 } else {
-                    run.len = truncate_at + ellipsis.len();
+                    run.len = truncate_at + affix_len;
                     runs.splice(..run_index, std::iter::empty());
                     break;
                 }
@@ -537,7 +584,7 @@ fn update_runs_after_truncation(
                 if run.len <= truncate_at {
                     truncate_at -= run.len;
                 } else {
-                    run.len = truncate_at + ellipsis.len();
+                    run.len = truncate_at + affix_len;
                     runs.truncate(run_index + 1);
                     break;
                 }
@@ -550,7 +597,7 @@ fn update_runs_after_truncation(
 }
 
 fn update_runs_after_middle_truncation(
-    ellipsis: &str,
+    affix_len: usize,
     runs: &mut Vec<TextRun>,
     front_end_ix: usize,
     back_start_ix: usize,
@@ -572,7 +619,7 @@ fn update_runs_after_middle_truncation(
             front_remaining -= run.len;
         } else {
             let mut partial = run.clone();
-            partial.len = front_remaining + ellipsis.len();
+            partial.len = front_remaining + affix_len;
             result_runs.push(partial);
             front_done = true;
         }
@@ -581,10 +628,10 @@ fn update_runs_after_middle_truncation(
         // front_end_ix landed exactly on a run boundary; append ellipsis to
         // the last front run (or, if the front is empty, to the first back run).
         if let Some(last) = result_runs.last_mut() {
-            last.len += ellipsis.len();
+            last.len += affix_len;
         } else if let Some(first) = original_runs.first() {
             let mut affix_run = first.clone();
-            affix_run.len = ellipsis.len();
+            affix_run.len = affix_len;
             result_runs.push(affix_run);
         }
     }
@@ -1091,7 +1138,12 @@ mod tests {
     fn test_update_run_after_truncation_end() {
         fn perform_test(result: &str, run_lens: &[usize], result_run_lens: &[usize]) {
             let mut dummy_runs = generate_test_runs(run_lens);
-            update_runs_after_truncation(result, "…", &mut dummy_runs, TruncateFrom::End);
+            update_runs_after_truncation(
+                result.len(),
+                "…".len(),
+                &mut dummy_runs,
+                TruncateFrom::End,
+            );
             for (run, result_len) in dummy_runs.iter().zip(result_run_lens) {
                 assert_eq!(run.len, *result_len);
             }

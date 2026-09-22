@@ -21,7 +21,9 @@ pub use conditional::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod conditional {
     use super::*;
-    use crate::{AnyElement, App, Context, Empty, IntoElement, Render, Window};
+    use crate::{
+        AnyElement, App, Context, Empty, IntoElement, ParentElement, Render, Styled, Window, div,
+    };
     use collections::{FxHashMap, TypeIdHashMap, hash_map::Entry};
     use std::any::{Any, TypeId};
 
@@ -162,6 +164,22 @@ mod conditional {
         ) -> Vec<AnyElement> {
             let mut elements = Vec::new();
             if let Some(active_element) = self.active_element.take() {
+                elements.push(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_xs()
+                        .child("Retained tree")
+                        .children(
+                            window
+                                .retained_tree
+                                .inspector_lines(&active_element.id)
+                                .into_iter()
+                                .map(|line| div().child(line)),
+                        )
+                        .into_any_element(),
+                );
                 for (type_id, state) in &active_element.states {
                     let renderer = match self.renderers.entry(*type_id) {
                         Entry::Occupied(entry) => entry.into_mut(),

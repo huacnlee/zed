@@ -1,8 +1,8 @@
 use anyhow::{Context as _, Result};
 use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
-    AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasBackend, AtlasGeneration, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind,
+    AtlasTextureList, AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
 use parking_lot::Mutex;
 use std::{borrow::Cow, ops, sync::Arc};
@@ -107,6 +107,10 @@ impl WgpuAtlas {
 }
 
 impl PlatformAtlas for WgpuAtlas {
+    fn generation(&self) -> Option<AtlasGeneration> {
+        self.0.lock().generation()
+    }
+
     fn get_or_insert_with<'a>(
         &self,
         key: AtlasKey,

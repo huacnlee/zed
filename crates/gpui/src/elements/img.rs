@@ -1,11 +1,14 @@
+use super::div::InteractivityRetainedProperties;
+use crate::retained::{Damage, EnvironmentDiff, Isolation, RetainableElement};
 use crate::{
     AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
     Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
     Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, decode_static_image,
-    decode_static_image_from_decoder, px,
+    SharedString, SharedUri, Size, Style, StyleRefinement, Styled, Task, Window,
+    decode_static_image, decode_static_image_from_decoder, px,
 };
 use anyhow::Result;
+use refineable::Refineable as _;
 
 use futures::Future;
 use gpui_util::ResultExt;
@@ -18,6 +21,7 @@ use smallvec::SmallVec;
 use std::{
     fs,
     io::{self, Cursor},
+    mem::{Discriminant, discriminant},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     str::FromStr,
@@ -208,6 +212,20 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
 }
 
 impl Img {
+    fn retained_properties_with_style(
+        &self,
+        style: Style,
+        image: Option<(crate::ImageId, usize)>,
+    ) -> ImgRetainedProperties {
+        ImgRetainedProperties {
+            interactivity: self.interactivity.retained_properties(style),
+            image,
+            custom_source: matches!(self.source, ImageSource::Custom(_)),
+            grayscale: self.style.grayscale,
+            object_fit: discriminant(&self.style.object_fit),
+        }
+    }
+
     /// A list of all format extensions currently supported by this img element
     pub fn extensions() -> &'static [&'static str] {
         // This is the list in [image::ImageFormat::from_extension] + `svg`
@@ -262,9 +280,103 @@ pub struct ImgLayoutState {
     replacement: Option<AnyElement>,
 }
 
+pub(crate) struct ImgRetainedProperties {
+    interactivity: InteractivityRetainedProperties,
+    image: Option<(crate::ImageId, usize)>,
+    custom_source: bool,
+    grayscale: bool,
+    object_fit: Discriminant<ObjectFit>,
+}
+
+impl RetainableElement for Img {
+    type RetainedProperties = ImgRetainedProperties;
+
+    fn retained_properties(&self) -> Self::RetainedProperties {
+        let mut style = Style::default();
+        style.refine(&self.interactivity.base_style);
+        let image = match &self.source {
+            ImageSource::Render(image) if image.frame_count() > 0 => Some((image.id, 0)),
+            _ => None,
+        };
+        self.retained_properties_with_style(style, image)
+    }
+
+    fn diff(
+        previous: &Self::RetainedProperties,
+        current: &Self::RetainedProperties,
+        environment: &EnvironmentDiff,
+    ) -> Damage {
+        if current.image.is_none() || current.custom_source {
+            return Damage::FULL;
+        }
+        let mut damage = InteractivityRetainedProperties::diff(
+            &previous.interactivity,
+            &current.interactivity,
+            environment,
+        );
+        if previous.image != current.image
+            || previous.grayscale != current.grayscale
+            || previous.object_fit != current.object_fit
+        {
+            damage |= Damage::PAINT;
+        }
+        damage
+    }
+
+    fn property_heap_bytes(properties: &Self::RetainedProperties) -> usize {
+        properties.interactivity.heap_bytes()
+    }
+}
+
 impl Element for Img {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = ImgLayoutState;
     type PrepaintState = Option<Hitbox>;
+
+    fn try_reuse_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(LayoutId, Self::RequestLayoutState)> {
+        let ImageSource::Render(data) = &self.source else {
+            return None;
+        };
+        if data.frame_count() != 1 {
+            return None;
+        }
+        let mut style = self.interactivity.retained_layout_style(cx)?;
+        apply_intrinsic_size(&mut style, data.render_size(0), window.rem_size());
+        let layout = window.reuse_leaf_layout(&style)?;
+        if window.retains_element_properties() {
+            window.reconcile_retained_property_value::<Self>(
+                self.retained_properties_with_style(style, Some((data.id, 0))),
+                Isolation::empty(),
+                cx,
+            );
+        }
+        Some(
+            window.with_optional_element_state::<ImgState, _>(id, |state, _| {
+                let state = state.map(|_| ImgState {
+                    frame_index: 0,
+                    last_frame_time: None,
+                    started_loading: None,
+                });
+                (
+                    (
+                        layout,
+                        ImgLayoutState {
+                            frame_index: 0,
+                            replacement: None,
+                        },
+                    ),
+                    state,
+                )
+            }),
+        )
+    }
 
     fn id(&self) -> Option<ElementId> {
         self.interactivity.element_id.clone()
@@ -296,6 +408,8 @@ impl Element for Img {
             });
 
             let mut frame_index = state.as_ref().map(|state| state.frame_index).unwrap_or(0);
+            let mut retained_style = None;
+            let mut resolved_image = None;
 
             let layout_id = self.interactivity.request_layout(
                 global_id,
@@ -345,38 +459,13 @@ impl Element for Img {
                                 frame_index = state.frame_index;
                             }
 
-                            let image_size = data.render_size(frame_index);
-
-                            if style.aspect_ratio.is_none() {
-                                style.aspect_ratio = Some(image_size.width / image_size.height);
-                            }
-
-                            if let Length::Auto = style.size.width {
-                                style.size.width = match style.size.height {
-                                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
-                                        let height_px = abs_length.to_pixels(window.rem_size());
-                                        Length::Definite(
-                                            px(image_size.width.0 * height_px.0
-                                                / image_size.height.0)
-                                            .into(),
-                                        )
-                                    }
-                                    _ => Length::Definite(image_size.width.into()),
-                                };
-                            }
-
-                            if let Length::Auto = style.size.height {
-                                style.size.height = match style.size.width {
-                                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
-                                        let width_px = abs_length.to_pixels(window.rem_size());
-                                        Length::Definite(
-                                            px(image_size.height.0 * width_px.0
-                                                / image_size.width.0)
-                                            .into(),
-                                        )
-                                    }
-                                    _ => Length::Definite(image_size.height.into()),
-                                };
+                            apply_intrinsic_size(
+                                &mut style,
+                                data.render_size(frame_index),
+                                window.rem_size(),
+                            );
+                            if frame_count > 0 {
+                                resolved_image = Some((data.id, frame_index));
                             }
 
                             if global_id.is_some()
@@ -422,11 +511,21 @@ impl Element for Img {
                         }
                     }
 
+                    if window.retains_element_properties() {
+                        retained_style = Some(style.clone());
+                    }
                     window.request_layout(style, replacement_id, cx)
                 },
             );
 
             layout_state.frame_index = frame_index;
+            if let Some(style) = retained_style {
+                window.reconcile_retained_property_value::<Self>(
+                    self.retained_properties_with_style(style, resolved_image),
+                    Isolation::empty(),
+                    cx,
+                );
+            }
 
             ((layout_id, layout_state), state)
         })
@@ -493,13 +592,14 @@ impl Element for Img {
                         .get_bounds(bounds, data.size(layout_state.frame_index));
                     let corner_radii = style.corner_radii.to_pixels(window.rem_size());
                     window
-                        .paint_image(
+                        .paint_retained_image(
                             bounds,
                             new_bounds,
                             corner_radii,
                             data,
                             layout_state.frame_index,
                             self.style.grayscale,
+                            cx,
                         )
                         .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {
@@ -507,6 +607,30 @@ impl Element for Img {
                 }
             },
         )
+    }
+}
+
+fn apply_intrinsic_size(style: &mut Style, image_size: Size<Pixels>, rem_size: Pixels) {
+    if style.aspect_ratio.is_none() {
+        style.aspect_ratio = Some(image_size.width / image_size.height);
+    }
+    if let Length::Auto = style.size.width {
+        style.size.width = match style.size.height {
+            Length::Definite(DefiniteLength::Absolute(length)) => {
+                let height = length.to_pixels(rem_size);
+                Length::Definite(px(image_size.width.0 * height.0 / image_size.height.0).into())
+            }
+            _ => Length::Definite(image_size.width.into()),
+        };
+    }
+    if let Length::Auto = style.size.height {
+        style.size.height = match style.size.width {
+            Length::Definite(DefiniteLength::Absolute(length)) => {
+                let width = length.to_pixels(rem_size);
+                Length::Definite(px(image_size.height.0 * width.0 / image_size.width.0).into())
+            }
+            _ => Length::Definite(image_size.height.into()),
+        };
     }
 }
 
@@ -806,6 +930,51 @@ mod tests {
     use image::{Frame, ImageBuffer, Rgba};
 
     const TEST_IMG_ID: &str = "test-img";
+
+    #[test]
+    fn retained_image_options_and_frames_only_damage_paint() {
+        let environment = EnvironmentDiff {
+            metrics: false,
+            text_layout: false,
+            text_paint: false,
+            composite: false,
+        };
+        let image = test_image(2);
+        let previous = img(image.clone()).retained_properties();
+        for current in [
+            img(image.clone()).grayscale(true).retained_properties(),
+            img(image.clone())
+                .object_fit(ObjectFit::Cover)
+                .retained_properties(),
+            img(test_image(2)).retained_properties(),
+            img(image.clone())
+                .retained_properties_with_style(Style::default(), Some((image.id, 1))),
+        ] {
+            assert_eq!(Img::diff(&previous, &current, &environment), Damage::PAINT);
+            assert!(Img::diff(&current, &current, &environment).is_empty());
+        }
+    }
+
+    #[test]
+    fn retained_image_unresolved_and_custom_sources_remain_conservative() {
+        let environment = EnvironmentDiff {
+            metrics: false,
+            text_layout: false,
+            text_paint: false,
+            composite: false,
+        };
+        let image = test_image(1);
+        let previous = img(image.clone()).retained_properties();
+        let unresolved = img("loading.png").retained_properties();
+        assert_eq!(
+            Img::diff(&previous, &unresolved, &environment),
+            Damage::FULL
+        );
+        let image_id = image.id;
+        let custom = img(move |_: &mut Window, _: &mut App| Some(Ok(image.clone())))
+            .retained_properties_with_style(Style::default(), Some((image_id, 0)));
+        assert_eq!(Img::diff(&custom, &custom, &environment), Damage::FULL);
+    }
 
     fn test_image(frame_count: usize) -> Arc<RenderImage> {
         let frame = Frame::new(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 0])));

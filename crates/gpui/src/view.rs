@@ -1,18 +1,16 @@
+use crate::retained::{Isolation, SubtreeSnapshot};
 use crate::{
-    AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, ContentMask, Context,
-    Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
-    StyleRefinement, TextStyle, WeakEntity,
+    AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, Context, Element, ElementId,
+    Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Render,
+    RenderOnce, Size, Style, StyleRefinement, WeakEntity,
 };
 use crate::{Empty, Window};
 use anyhow::Result;
-use collections::FxHashSet;
 use refineable::Refineable;
 use std::mem;
 use std::{
     any::{TypeId, type_name},
     fmt,
-    ops::Range,
 };
 
 /// A dynamically-typed view handle that can be downcast to a specific `Entity<V>`.
@@ -292,20 +290,10 @@ impl<V: View> IntoElement for ViewElement<V> {
     }
 }
 
-struct ViewElementState {
-    prepaint_range: Range<PrepaintStateIndex>,
-    paint_range: Range<PaintIndex>,
-    cache_key: ViewElementCacheKey,
-    accessed_entities: FxHashSet<EntityId>,
-}
-
-struct ViewElementCacheKey {
-    bounds: Bounds<Pixels>,
-    content_mask: ContentMask<Pixels>,
-    text_style: TextStyle,
-}
-
 impl<V: View> Element for ViewElement<V> {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = Option<AnyElement>;
     type PrepaintState = Option<AnyElement>;
 
@@ -428,6 +416,13 @@ fn request_layout_view(
 ) -> (LayoutId, Option<AnyElement>) {
     window.with_rendered_view(entity_id, |window| {
         let caching_disabled = window.is_inspector_picking(cx);
+        window
+            .retained_tree
+            .isolate_current(if cached_style.is_some() && !caching_disabled {
+                Isolation::LAYOUT | Isolation::PAINT | Isolation::TRANSFORM
+            } else {
+                Isolation::empty()
+            });
         match cached_style {
             Some(style) if !caching_disabled => {
                 let mut root_style = Style::default();
@@ -475,56 +470,43 @@ fn prepaint_view(
             return Some(element);
         }
 
-        window.with_element_state::<ViewElementState, _>(
-            global_id.unwrap(),
-            |element_state, window| {
-                let content_mask = window.content_mask();
-                let text_style = window.text_style();
+        window.with_retained_subtree(global_id.unwrap(), |element_state, window| {
+            if let Some(mut element_state) = element_state
+                && element_state.can_reuse(bounds, window, cx)
+                && !window.dirty_views.contains(&entity_id)
+                && !window.refreshing
+                && element_state.replay_prepaint(window)
+            {
+                window.retained_tree.preserve_current_children();
+                cx.entities
+                    .extend_accessed(&element_state.accessed_entities);
 
-                if let Some(mut element_state) = element_state
-                    && element_state.cache_key.bounds == bounds
-                    && element_state.cache_key.content_mask == content_mask
-                    && element_state.cache_key.text_style == text_style
-                    && !window.dirty_views.contains(&entity_id)
-                    && !window.refreshing
-                {
-                    let prepaint_start = window.prepaint_index();
-                    window.reuse_prepaint(element_state.prepaint_range.clone());
-                    cx.entities
-                        .extend_accessed(&element_state.accessed_entities);
-                    let prepaint_end = window.prepaint_index();
-                    element_state.prepaint_range = prepaint_start..prepaint_end;
+                return (None, element_state);
+            }
 
-                    return (None, element_state);
-                }
+            let refreshing = mem::replace(&mut window.refreshing, true);
+            let prepaint_start = window.prepaint_index();
+            let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
+                let mut element = render(window, cx);
+                element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+                element.prepaint_at(bounds.origin, window, cx);
+                element
+            });
 
-                let refreshing = mem::replace(&mut window.refreshing, true);
-                let prepaint_start = window.prepaint_index();
-                let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
-                    let mut element = render(window, cx);
-                    element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
-                    element.prepaint_at(bounds.origin, window, cx);
-                    element
-                });
+            let prepaint_end = window.prepaint_index();
+            window.refreshing = refreshing;
 
-                let prepaint_end = window.prepaint_index();
-                window.refreshing = refreshing;
-
-                (
-                    Some(element),
-                    ViewElementState {
-                        accessed_entities,
-                        prepaint_range: prepaint_start..prepaint_end,
-                        paint_range: PaintIndex::default()..PaintIndex::default(),
-                        cache_key: ViewElementCacheKey {
-                            bounds,
-                            content_mask,
-                            text_style,
-                        },
-                    },
-                )
-            },
-        )
+            (
+                Some(element),
+                Box::new(SubtreeSnapshot::new(
+                    bounds,
+                    prepaint_start..prepaint_end,
+                    accessed_entities,
+                    window,
+                    cx,
+                )),
+            )
+        })
     })
 }
 
@@ -553,27 +535,24 @@ fn paint_view(
     window.with_rendered_view(entity_id, |window| {
         let caching_disabled = window.is_inspector_picking(cx);
         if cached && !caching_disabled {
-            window.with_element_state::<ViewElementState, _>(
-                global_id.unwrap(),
-                |element_state, window| {
-                    let mut element_state = element_state.unwrap();
+            window.with_retained_subtree(global_id.unwrap(), |element_state, window| {
+                let mut element_state = element_state.unwrap();
 
-                    let paint_start = window.paint_index();
+                let paint_start = window.paint_index();
 
-                    if let Some(element) = element {
-                        let refreshing = mem::replace(&mut window.refreshing, true);
-                        element.paint(window, cx);
-                        window.refreshing = refreshing;
-                    } else {
-                        window.reuse_paint(element_state.paint_range.clone());
-                    }
+                if let Some(element) = element {
+                    let refreshing = mem::replace(&mut window.refreshing, true);
+                    element.paint(window, cx);
+                    window.refreshing = refreshing;
+                } else {
+                    window.reuse_paint(element_state.paint_range.clone());
+                }
 
-                    let paint_end = window.paint_index();
-                    element_state.paint_range = paint_start..paint_end;
+                let paint_end = window.paint_index();
+                element_state.finish_paint(paint_start..paint_end, window);
 
-                    ((), element_state)
-                },
-            )
+                ((), element_state)
+            })
         } else {
             element.as_mut().unwrap().paint(window, cx);
         }

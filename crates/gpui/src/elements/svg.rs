@@ -5,12 +5,16 @@ use std::{
     sync::Arc,
 };
 
+use super::div::InteractivityRetainedProperties;
+use crate::Style;
+use crate::retained::{Damage, EnvironmentDiff, Isolation, RetainableElement};
 use crate::{
     App, Asset, Bounds, Element, GlobalElementId, Hitbox, InspectorElementId, InteractiveElement,
     Interactivity, IntoElement, LayoutId, Pixels, Point, Radians, SharedString, Size,
     StyleRefinement, Styled, TransformationMatrix, Window, point, px, radians, size,
 };
 use gpui_util::ResultExt;
+use refineable::Refineable as _;
 
 /// An SVG element.
 pub struct Svg {
@@ -36,6 +40,23 @@ pub fn svg() -> Svg {
 }
 
 impl Svg {
+    fn retained_properties_with_style(&self, style: Style) -> SvgRetainedProperties {
+        let source = if let Some(data) = self.data.as_ref().filter(|_| self.data_path.is_some()) {
+            SvgRetainedSource::Data(data.clone())
+        } else if let Some(path) = &self.external_path {
+            SvgRetainedSource::External(path.clone())
+        } else if let Some(path) = &self.path {
+            SvgRetainedSource::Asset(path.clone())
+        } else {
+            SvgRetainedSource::None
+        };
+        SvgRetainedProperties {
+            interactivity: self.interactivity.retained_properties(style),
+            source,
+            transformation: self.transformation,
+        }
+    }
+
     /// Set the path to the SVG file for this element.
     pub fn path(mut self, path: impl Into<SharedString>) -> Self {
         self.path = Some(path.into());
@@ -69,7 +90,129 @@ impl Svg {
     }
 }
 
+#[derive(PartialEq)]
+enum SvgRetainedSource {
+    None,
+    Asset(SharedString),
+    External(SharedString),
+    Data(Arc<[u8]>),
+}
+
+pub(crate) struct SvgRetainedProperties {
+    interactivity: InteractivityRetainedProperties,
+    source: SvgRetainedSource,
+    transformation: Option<Transformation>,
+}
+
+impl RetainableElement for Svg {
+    type RetainedProperties = SvgRetainedProperties;
+
+    fn retained_properties(&self) -> Self::RetainedProperties {
+        let mut style = Style::default();
+        style.refine(&self.interactivity.base_style);
+        self.retained_properties_with_style(style)
+    }
+
+    fn diff(
+        previous: &Self::RetainedProperties,
+        current: &Self::RetainedProperties,
+        environment: &EnvironmentDiff,
+    ) -> Damage {
+        let mut damage = InteractivityRetainedProperties::diff(
+            &previous.interactivity,
+            &current.interactivity,
+            environment,
+        );
+        if previous.source != current.source {
+            damage |= Damage::PAINT;
+        }
+        if previous.transformation != current.transformation {
+            // SVG transformations are currently baked into the sprite paint output.
+            damage |= Damage::TRANSFORM | Damage::PAINT;
+        }
+        damage
+    }
+
+    fn property_heap_bytes(properties: &Self::RetainedProperties) -> usize {
+        properties.interactivity.heap_bytes()
+            + match &properties.source {
+                SvgRetainedSource::None => 0,
+                SvgRetainedSource::Asset(path) | SvgRetainedSource::External(path) => path.len(),
+                SvgRetainedSource::Data(data) => data.len(),
+            }
+    }
+}
+
+#[cfg(test)]
+mod retained_tests {
+    use super::*;
+
+    #[test]
+    fn svg_resource_diff_respects_source_precedence() {
+        let environment = EnvironmentDiff {
+            metrics: false,
+            text_layout: false,
+            text_paint: false,
+            composite: false,
+        };
+        for (previous, current, expected) in [
+            (svg().path("a.svg"), svg().path("a.svg"), Damage::empty()),
+            (svg().path("a.svg"), svg().path("b.svg"), Damage::PAINT),
+            (
+                svg().path("a.svg"),
+                svg().external_path("a.svg"),
+                Damage::PAINT,
+            ),
+            (svg().path("a.svg"), svg(), Damage::PAINT),
+            (
+                svg().data(b"same").path("a.svg"),
+                svg().data(b"same").external_path("b.svg"),
+                Damage::empty(),
+            ),
+            (svg().data(b"first"), svg().data(b"second"), Damage::PAINT),
+        ] {
+            assert_eq!(
+                Svg::diff(
+                    &previous.retained_properties(),
+                    &current.retained_properties(),
+                    &environment
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn svg_transform_diff_does_not_invalidate_layout_or_hitboxes() {
+        let environment = EnvironmentDiff {
+            metrics: false,
+            text_layout: false,
+            text_paint: false,
+            composite: false,
+        };
+        let previous = svg().path("a.svg").retained_properties();
+        for transformation in [
+            Transformation::translate(point(px(4.), px(2.))),
+            Transformation::scale(size(2., 0.5)),
+            Transformation::rotate(radians(0.5)),
+        ] {
+            let current = svg()
+                .path("a.svg")
+                .with_transformation(transformation)
+                .retained_properties();
+            assert_eq!(
+                Svg::diff(&previous, &current, &environment),
+                Damage::TRANSFORM | Damage::PAINT
+            );
+            assert!(Svg::diff(&current, &current, &environment).is_empty());
+        }
+    }
+}
+
 impl Element for Svg {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = ();
     type PrepaintState = Option<Hitbox>;
 
@@ -88,14 +231,45 @@ impl Element for Svg {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut retained_style = None;
         let layout_id = self.interactivity.request_layout(
             global_id,
             inspector_id,
             window,
             cx,
-            |style, window, cx| window.request_layout(style, None, cx),
+            |style, window, cx| {
+                if window.retains_element_properties() {
+                    retained_style = Some(style.clone());
+                }
+                window.request_layout(style, None, cx)
+            },
         );
+        if let Some(style) = retained_style {
+            window.reconcile_retained_property_value::<Self>(
+                self.retained_properties_with_style(style),
+                Isolation::empty(),
+                cx,
+            );
+        }
         (layout_id, ())
+    }
+
+    fn try_reuse_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(LayoutId, Self::RequestLayoutState)> {
+        let style = self.interactivity.retained_layout_style(cx)?;
+        let layout = window.reuse_leaf_layout(&style)?;
+        if window.retains_element_properties() {
+            window.reconcile_retained_property_value::<Self>(
+                self.retained_properties_with_style(style),
+                Isolation::empty(),
+                cx,
+            );
+        }
+        Some((layout, ()))
     }
 
     fn prepaint(
@@ -149,7 +323,7 @@ impl Element for Svg {
                 if let Some((data, path)) = self.data.as_ref().zip(self.data_path.as_ref()) {
                     if let Some(color) = style.text.color {
                         window
-                            .paint_svg(
+                            .paint_retained_svg(
                                 bounds,
                                 path.clone(),
                                 Some(&**data),
@@ -170,7 +344,7 @@ impl Element for Svg {
                     };
 
                     window
-                        .paint_svg(
+                        .paint_retained_svg(
                             bounds,
                             path.clone(),
                             Some(&bytes),
@@ -181,7 +355,7 @@ impl Element for Svg {
                         .log_err();
                 } else if let Some((path, color)) = self.path.as_ref().zip(style.text.color) {
                     window
-                        .paint_svg(bounds, path.clone(), None, transformation, color, cx)
+                        .paint_retained_svg(bounds, path.clone(), None, transformation, color, cx)
                         .log_err();
                 }
             },

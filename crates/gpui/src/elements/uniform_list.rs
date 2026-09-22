@@ -667,7 +667,7 @@ impl UniformList {
 
         let item_ix = cmp::min(self.item_to_measure_index, self.item_count - 1);
         let mut items = (self.render_items)(item_ix..item_ix + 1, window, cx);
-        let Some(mut item_to_measure) = items.pop() else {
+        let Some(item_to_measure) = items.pop() else {
             return Size::default();
         };
         let available_space = size(
@@ -676,7 +676,7 @@ impl UniformList {
             }),
             AvailableSpace::MinContent,
         );
-        item_to_measure.layout_as_root(available_space, window, cx)
+        item_to_measure.measure(available_space, window, cx)
     }
 
     /// Track and render scroll state of this list with reference to the given scroll handle.

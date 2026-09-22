@@ -46,6 +46,9 @@ pub mod profiler;
 ))]
 #[expect(missing_docs)]
 pub mod queue;
+mod retained;
+#[cfg(feature = "bench-support")]
+pub use retained::RetainedFrameSnapshot;
 mod scene;
 mod shared_uri;
 mod spring;

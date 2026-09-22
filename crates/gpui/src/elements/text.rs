@@ -1,15 +1,19 @@
+use crate::retained::{Damage, EnvironmentDiff, RetainableElement};
+use crate::taffy::RetainedMeasure;
 use crate::{
-    ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    ActiveTooltip, AnyView, App, AvailableSpace, Bounds, DecorationRun, DispatchPhase, Element,
+    ElementId, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    RunTruncation, SharedString, Size, TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom,
+    WhiteSpace, Window, WrappedLine, WrappedLineLayout, register_tooltip_mouse_handlers,
+    set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
 use itertools::Itertools;
 use smallvec::SmallVec;
 use std::{
+    any::Any,
     borrow::Cow,
     cell::{Cell, RefCell},
     mem,
@@ -175,6 +179,9 @@ impl IntoElement for Text {
 }
 
 impl Element for Text {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = TextLayout;
     type PrepaintState = ();
 
@@ -252,6 +259,9 @@ impl Element for Text {
 }
 
 impl Element for &'static str {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = TextLayout;
     type PrepaintState = ();
 
@@ -270,6 +280,7 @@ impl Element for &'static str {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        window.reconcile_retained_properties(self, cx);
         let mut state = TextLayout::default();
         let layout_id = state.layout(SharedString::from(*self), None, window, cx);
         (layout_id, state)
@@ -326,6 +337,9 @@ impl IntoElement for Cow<'static, str> {
 }
 
 impl Element for SharedString {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = TextLayout;
     type PrepaintState = ();
 
@@ -344,6 +358,7 @@ impl Element for SharedString {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        window.reconcile_retained_properties(self, cx);
         let mut state = TextLayout::default();
         let layout_id = state.layout(self.clone(), None, window, cx);
         (layout_id, state)
@@ -380,6 +395,52 @@ impl IntoElement for SharedString {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+fn plain_text_damage(changed: bool, environment: &EnvironmentDiff) -> Damage {
+    if changed || environment.metrics || environment.text_layout {
+        Damage::LAYOUT | Damage::PREPAINT | Damage::PAINT
+    } else if environment.text_paint || environment.composite {
+        Damage::PAINT
+    } else {
+        Damage::empty()
+    }
+}
+
+impl RetainableElement for SharedString {
+    type RetainedProperties = SharedString;
+
+    fn retained_properties(&self) -> Self::RetainedProperties {
+        self.clone()
+    }
+
+    fn diff(
+        previous: &Self::RetainedProperties,
+        current: &Self::RetainedProperties,
+        environment: &EnvironmentDiff,
+    ) -> Damage {
+        plain_text_damage(previous != current, environment)
+    }
+
+    fn property_heap_bytes(properties: &Self::RetainedProperties) -> usize {
+        properties.len()
+    }
+}
+
+impl RetainableElement for &'static str {
+    type RetainedProperties = &'static str;
+
+    fn retained_properties(&self) -> Self::RetainedProperties {
+        self
+    }
+
+    fn diff(
+        previous: &Self::RetainedProperties,
+        current: &Self::RetainedProperties,
+        environment: &EnvironmentDiff,
+    ) -> Damage {
+        plain_text_damage(previous != current, environment)
     }
 }
 
@@ -539,7 +600,75 @@ impl StyledText {
     }
 }
 
+pub(crate) struct StyledTextProperties {
+    text: SharedString,
+    runs: Option<Vec<TextRun>>,
+}
+
+impl StyledTextProperties {
+    fn diff(
+        &self,
+        text: &SharedString,
+        runs: Option<&[TextRun]>,
+        environment: &EnvironmentDiff,
+    ) -> Damage {
+        let same_shaping = match (self.runs.as_deref(), runs) {
+            (Some(previous), Some(current)) => text_runs_have_same_shaping(previous, current),
+            (None, None) => true,
+            _ => false,
+        };
+        let mut damage = plain_text_damage(self.text != *text || !same_shaping, environment);
+        if self.runs.as_deref() != runs {
+            damage |= Damage::PAINT;
+        }
+        damage
+    }
+}
+
+impl RetainableElement for StyledText {
+    type RetainedProperties = StyledTextProperties;
+
+    fn retained_properties(&self) -> Self::RetainedProperties {
+        StyledTextProperties {
+            text: self.text.clone(),
+            runs: self.runs.clone(),
+        }
+    }
+
+    fn diff(
+        previous: &Self::RetainedProperties,
+        current: &Self::RetainedProperties,
+        environment: &EnvironmentDiff,
+    ) -> Damage {
+        previous.diff(&current.text, current.runs.as_deref(), environment)
+    }
+
+    fn property_heap_bytes(properties: &Self::RetainedProperties) -> usize {
+        properties.text.len()
+            + properties.runs.as_ref().map_or(0, |runs| {
+                runs.capacity() * size_of::<TextRun>()
+                    + runs.iter().map(|run| run.font.family.len()).sum::<usize>()
+            })
+    }
+
+    fn update_retained_properties(
+        &self,
+        previous: &mut Self::RetainedProperties,
+        environment: &EnvironmentDiff,
+    ) -> Damage {
+        let damage = previous.diff(&self.text, self.runs.as_deref(), environment);
+        if !damage.is_empty() {
+            previous.text.clone_from(&self.text);
+            previous.runs.clone_from(&self.runs);
+        }
+        damage
+    }
+}
+
 impl Element for StyledText {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = ();
     type PrepaintState = ();
 
@@ -571,6 +700,9 @@ impl Element for StyledText {
             Self::apply_font_family_overrides(runs, overrides);
         }
 
+        self.runs = Some(runs.unwrap_or_else(|| vec![window.text_style().to_run(self.text.len())]));
+        window.reconcile_retained_properties(self, cx);
+        let runs = self.runs.take();
         let layout_id = self.layout.layout(self.text.clone(), runs, window, cx);
         (layout_id, ())
     }
@@ -613,14 +745,16 @@ impl IntoElement for StyledText {
 #[derive(Default, Clone)]
 pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
 
+#[derive(Clone)]
 struct TextLayoutInner {
     len: usize,
-    lines: SmallVec<[WrappedLine; 1]>,
+    lines: Rc<SmallVec<[WrappedLine; 1]>>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
     truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
+    run_truncation: RunTruncation,
 }
 
 impl TextLayout {
@@ -629,7 +763,7 @@ impl TextLayout {
         text: SharedString,
         runs: Option<Vec<TextRun>>,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> LayoutId {
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
@@ -644,142 +778,310 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        window.request_measured_layout(Default::default(), {
-            let element_state = self.clone();
+        let measure = TextMeasure {
+            text,
+            runs,
+            text_style,
+            font_size,
+            line_height,
+            font_generation: cx.text_system().font_generation(),
+            rem_size: window.rem_size(),
+            scale_factor: window.scale_factor(),
+            layout: self.clone(),
+        };
+        window.request_retained_measured_layout(Default::default(), measure)
+    }
+}
 
-            move |known_dimensions, available_space, window, cx| {
-                let wrap_width = if text_style.white_space == WhiteSpace::Normal {
-                    known_dimensions.width.or(match available_space.width {
-                        crate::AvailableSpace::Definite(x) => Some(x),
-                        _ => None,
-                    })
-                } else {
-                    None
-                };
+struct TextMeasure {
+    text: SharedString,
+    runs: Vec<TextRun>,
+    text_style: TextStyle,
+    font_size: Pixels,
+    line_height: Pixels,
+    font_generation: usize,
+    rem_size: Pixels,
+    scale_factor: f32,
+    layout: TextLayout,
+}
 
-                let (truncate_width, truncation_affix, truncate_from) =
-                    if let Some(text_overflow) = text_style.text_overflow.clone() {
-                        let width = known_dimensions.width.or(match available_space.width {
-                            crate::AvailableSpace::Definite(x) => match text_style.line_clamp {
-                                Some(max_lines) => Some(x * max_lines),
-                                None => Some(x),
-                            },
-                            _ => None,
-                        });
+impl RetainedMeasure for TextMeasure {
+    fn measure(
+        &mut self,
+        known_dimensions: Size<Option<Pixels>>,
+        available_space: Size<AvailableSpace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels> {
+        let text_style = &self.text_style;
+        let text = &self.text;
+        let runs = self.runs.as_slice();
+        let element_state = &self.layout;
+        let font_size = self.font_size;
+        let line_height = self.line_height;
+        let wrap_width = if text_style.white_space == WhiteSpace::Normal {
+            known_dimensions.width.or(match available_space.width {
+                AvailableSpace::Definite(x) => Some(x),
+                _ => None,
+            })
+        } else {
+            None
+        };
 
-                        match text_overflow {
-                            TextOverflow::Truncate(s) => (width, s, TruncateFrom::End),
-                            TextOverflow::TruncateStart(s) => (width, s, TruncateFrom::Start),
-                            TextOverflow::TruncateMiddle(s) => (width, s, TruncateFrom::Middle),
-                        }
-                    } else {
-                        (None, "".into(), TruncateFrom::End)
-                    };
-
-                // Only use cached layout if:
-                // 1. We have a cached size
-                // 2. wrap_width matches (or both are None)
-                // 3. truncate_width is None (if truncate_width is Some, we need to re-layout
-                //    because the previous layout may have been computed without truncation)
-                // 4. the cached layout was not truncated (a truncated layout answers an
-                //    unconstrained probe with the truncated size, which poisons intrinsic
-                //    sizing with whatever width some earlier measure pass happened to use)
-                if let Some(text_layout) = element_state.0.borrow().as_ref()
-                    && let Some(size) = text_layout.size
-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
-                    && truncate_width.is_none()
-                    && text_layout.truncate_width.is_none()
-                {
-                    return size;
-                }
-
-                let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
-                let (text, runs) = if let Some(truncate_width) = truncate_width {
-                    if let Some(max_lines) = text_style.line_clamp
-                        && let Some(wrap_width) = wrap_width
-                    {
-                        line_wrapper.truncate_wrapped_line(
-                            text.clone(),
-                            wrap_width,
-                            max_lines,
-                            &truncation_affix,
-                            &runs,
-                            truncate_from,
-                        )
-                    } else if let Some(unclipped) = window
-                        .text_system()
-                        .shape_text(text.clone(), font_size, &runs, None, None)
-                        .log_err()
-                        && unclipped
-                            .iter()
-                            .all(|line| line.size(line_height).width <= truncate_width)
-                    {
-                        // The truncation decision below sums per-character advances,
-                        // which overestimates the shaped width (no kerning), truncating
-                        // text that fits exactly in its measured width. Skip truncation
-                        // whenever the honestly-shaped text fits; the shaping result
-                        // comes from the line layout cache when the same text was
-                        // already measured untruncated this frame.
-                        (text.clone(), Cow::Borrowed(&*runs))
-                    } else {
-                        line_wrapper.truncate_line(
-                            text.clone(),
-                            truncate_width,
-                            &truncation_affix,
-                            &runs,
-                            truncate_from,
-                        )
-                    }
-                } else {
-                    (text.clone(), Cow::Borrowed(&*runs))
-                };
-                let len = text.len();
-
-                let Some(lines) = window
-                    .text_system()
-                    .shape_text(
-                        text,
-                        font_size,
-                        &runs,
-                        wrap_width,            // Wrap if we know the width.
-                        text_style.line_clamp, // Limit the number of lines if line_clamp is set.
-                    )
-                    .log_err()
-                else {
-                    element_state.0.borrow_mut().replace(TextLayoutInner {
-                        lines: Default::default(),
-                        len: 0,
-                        line_height,
-                        wrap_width,
-                        truncate_width,
-                        size: Some(Size::default()),
-                        bounds: None,
-                    });
-                    return Size::default();
-                };
-
-                let mut size: Size<Pixels> = Size::default();
-                for line in &lines {
-                    let line_size = line.size(line_height);
-                    size.height += line_size.height;
-                    size.width = size.width.max(line_size.width).ceil();
-                }
-
-                element_state.0.borrow_mut().replace(TextLayoutInner {
-                    lines,
-                    len,
-                    line_height,
-                    wrap_width,
-                    truncate_width,
-                    size: Some(size),
-                    bounds: None,
+        let (truncate_width, truncation_affix, truncate_from) =
+            if let Some(text_overflow) = text_style.text_overflow.clone() {
+                let width = known_dimensions.width.or(match available_space.width {
+                    AvailableSpace::Definite(x) => match text_style.line_clamp {
+                        Some(max_lines) => Some(x * max_lines),
+                        None => Some(x),
+                    },
+                    _ => None,
                 });
 
-                size
+                match text_overflow {
+                    TextOverflow::Truncate(s) => (width, s, TruncateFrom::End),
+                    TextOverflow::TruncateStart(s) => (width, s, TruncateFrom::Start),
+                    TextOverflow::TruncateMiddle(s) => (width, s, TruncateFrom::Middle),
+                }
+            } else {
+                (None, "".into(), TruncateFrom::End)
+            };
+
+        // Only use cached layout if:
+        // 1. We have a cached size
+        // 2. wrap_width matches (or both are None)
+        // 3. truncate_width is None (if truncate_width is Some, we need to re-layout
+        //    because the previous layout may have been computed without truncation)
+        // 4. the cached layout was not truncated (a truncated layout answers an
+        //    unconstrained probe with the truncated size, which poisons intrinsic
+        //    sizing with whatever width some earlier measure pass happened to use)
+        if let Some(text_layout) = element_state.0.borrow().as_ref()
+            && let Some(size) = text_layout.size
+            && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+            && truncate_width.is_none()
+            && text_layout.truncate_width.is_none()
+        {
+            return size;
+        }
+
+        let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+        line_wrapper.run_truncation = RunTruncation::None;
+        let (text, runs) = if let Some(truncate_width) = truncate_width {
+            if let Some(max_lines) = text_style.line_clamp
+                && let Some(wrap_width) = wrap_width
+            {
+                line_wrapper.truncate_wrapped_line(
+                    text.clone(),
+                    wrap_width,
+                    max_lines,
+                    &truncation_affix,
+                    &runs,
+                    truncate_from,
+                )
+            } else if let Some(unclipped) = window
+                .text_system()
+                .shape_text(text.clone(), font_size, &runs, None, None)
+                .log_err()
+                && unclipped
+                    .iter()
+                    .all(|line| line.size(line_height).width <= truncate_width)
+            {
+                // The truncation decision below sums per-character advances,
+                // which overestimates the shaped width (no kerning), truncating
+                // text that fits exactly in its measured width. Skip truncation
+                // whenever the honestly-shaped text fits; the shaping result
+                // comes from the line layout cache when the same text was
+                // already measured untruncated this frame.
+                (text.clone(), Cow::Borrowed(runs))
+            } else {
+                line_wrapper.truncate_line(
+                    text.clone(),
+                    truncate_width,
+                    &truncation_affix,
+                    &runs,
+                    truncate_from,
+                )
             }
-        })
+        } else {
+            (text.clone(), Cow::Borrowed(runs))
+        };
+        let len = text.len();
+
+        let Some(lines) = window
+            .text_system()
+            .shape_text(
+                text,
+                font_size,
+                &runs,
+                wrap_width,            // Wrap if we know the width.
+                text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+            )
+            .log_err()
+        else {
+            element_state.0.borrow_mut().replace(TextLayoutInner {
+                lines: Default::default(),
+                len: 0,
+                line_height,
+                wrap_width,
+                truncate_width,
+                size: Some(Size::default()),
+                bounds: None,
+                run_truncation: RunTruncation::None,
+            });
+            return Size::default();
+        };
+
+        let mut size: Size<Pixels> = Size::default();
+        for line in &lines {
+            let line_size = line.size(line_height);
+            size.height += line_size.height;
+            size.width = size.width.max(line_size.width).ceil();
+        }
+
+        element_state.0.borrow_mut().replace(TextLayoutInner {
+            lines: Rc::new(lines),
+            len,
+            line_height,
+            wrap_width,
+            truncate_width,
+            size: Some(size),
+            bounds: None,
+            run_truncation: line_wrapper.run_truncation,
+        });
+
+        size
     }
 
+    fn reuse(&mut self, previous: &dyn RetainedMeasure) -> bool {
+        let Some(previous) = (previous as &dyn Any).downcast_ref::<Self>() else {
+            return false;
+        };
+        if self.text != previous.text
+            || self.text_style.font() != previous.text_style.font()
+            || self.text_style.white_space != previous.text_style.white_space
+            || self.text_style.text_overflow != previous.text_style.text_overflow
+            || self.text_style.line_clamp != previous.text_style.line_clamp
+            || self.font_size != previous.font_size
+            || self.line_height != previous.line_height
+            || self.font_generation != previous.font_generation
+            || self.rem_size != previous.rem_size
+            || self.scale_factor != previous.scale_factor
+        {
+            return false;
+        }
+        let mut layout = previous.layout.0.borrow().clone();
+        if self.runs != previous.runs {
+            let Some(layout) = layout.as_mut() else {
+                return false;
+            };
+            if !text_runs_have_same_shaping(&self.runs, &previous.runs) {
+                return false;
+            }
+            let mut runs = self.runs.clone();
+            let mut previous_runs = previous.runs.clone();
+            layout.run_truncation.apply(&mut runs);
+            layout.run_truncation.apply(&mut previous_runs);
+            if !text_runs_have_same_shaping(&runs, &previous_runs) {
+                return false;
+            }
+            let Some(lines) = redecorate_text_lines(&layout.lines, &runs) else {
+                return false;
+            };
+            layout.lines = Rc::new(lines);
+        }
+        // StyledText::layout handles can escape before request_layout. Populate the
+        // current handle instead of replacing it with a previous frame's Rc.
+        *self.layout.0.borrow_mut() = layout;
+        true
+    }
+
+    fn reset(&mut self) {
+        self.layout.0.borrow_mut().take();
+    }
+}
+
+fn same_text_decoration(left: &TextRun, right: &TextRun) -> bool {
+    left.color == right.color
+        && left.background_color == right.background_color
+        && left.underline == right.underline
+        && left.strikethrough == right.strikethrough
+}
+
+fn text_runs_have_same_shaping(runs: &[TextRun], previous: &[TextRun]) -> bool {
+    let mut runs = runs.iter().filter(|run| run.len > 0);
+    let mut previous = previous.iter().filter(|run| run.len > 0);
+    let mut last = None;
+    loop {
+        let (run, previous_run) = match (runs.next(), previous.next()) {
+            (Some(run), Some(previous_run)) => (run, previous_run),
+            (None, None) => return true,
+            _ => return false,
+        };
+        if run.len != previous_run.len || run.font != previous_run.font {
+            return false;
+        }
+        // Shaping currently splits font runs at decoration boundaries, so changing
+        // which neighbors merge can change ligatures even when fonts are equal.
+        if let Some((last_run, last_previous)) = last
+            && same_text_decoration(last_run, run)
+                != same_text_decoration(last_previous, previous_run)
+        {
+            return false;
+        }
+        last = Some((run, previous_run));
+    }
+}
+
+fn redecorate_text_lines(
+    lines: &[WrappedLine],
+    runs: &[TextRun],
+) -> Option<SmallVec<[WrappedLine; 1]>> {
+    let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
+    let mut result = SmallVec::new();
+    for line in lines {
+        let mut remaining = line.text.len();
+        let mut decorations = Vec::<DecorationRun>::new();
+        while remaining > 0 {
+            let run = runs.peek_mut()?;
+            let len = remaining.min(run.len);
+            if let Some(last) = decorations.last_mut()
+                && last.color == run.color
+                && last.background_color == run.background_color
+                && last.underline == run.underline
+                && last.strikethrough == run.strikethrough
+            {
+                last.len += len as u32;
+            } else {
+                decorations.push(DecorationRun {
+                    len: len as u32,
+                    color: run.color,
+                    background_color: run.background_color,
+                    underline: run.underline,
+                    strikethrough: run.strikethrough,
+                });
+            }
+            run.len -= len;
+            remaining -= len;
+            if run.len == 0 {
+                runs.next();
+            }
+        }
+        result.push(WrappedLine {
+            layout: line.layout.clone(),
+            text: line.text.clone(),
+            decoration_runs: decorations,
+        });
+        if let Some(run) = runs.peek_mut() {
+            run.len -= 1;
+            if run.len == 0 {
+                runs.next();
+            }
+        }
+    }
+    Some(result)
+}
+
+impl TextLayout {
     fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
         let mut element_state = self.0.borrow_mut();
         let element_state = element_state
@@ -801,29 +1103,43 @@ impl TextLayout {
             .unwrap();
 
         let line_height = element_state.line_height;
-        let mut line_origin = bounds.origin;
         let text_style = window.text_style();
-        for line in &element_state.lines {
-            line.paint_background(
-                line_origin,
-                line_height,
-                text_style.text_align,
-                Some(bounds),
-                window,
-                cx,
-            )
-            .log_err();
-            line.paint(
-                line_origin,
-                line_height,
-                text_style.text_align,
-                Some(bounds),
-                window,
-                cx,
-            )
-            .log_err();
-            line_origin.y += line.size(line_height).height;
-        }
+        window.paint_retained_text(
+            &element_state.lines,
+            line_height,
+            bounds,
+            cx,
+            |window, cx| {
+                let mut line_origin = bounds.origin;
+                let mut successful = true;
+                for line in element_state.lines.iter() {
+                    successful &= line
+                        .paint_background(
+                            line_origin,
+                            line_height,
+                            text_style.text_align,
+                            Some(bounds),
+                            window,
+                            cx,
+                        )
+                        .log_err()
+                        .is_some();
+                    successful &= line
+                        .paint(
+                            line_origin,
+                            line_height,
+                            text_style.text_align,
+                            Some(bounds),
+                            window,
+                            cx,
+                        )
+                        .log_err()
+                        .is_some();
+                    line_origin.y += line.size(line_height).height;
+                }
+                successful
+            },
+        );
     }
 
     /// Get the byte index into the input of the pixel position.
@@ -843,7 +1159,7 @@ impl TextLayout {
         let line_height = element_state.line_height;
         let mut line_origin = bounds.origin;
         let mut line_start_ix = 0;
-        for line in &element_state.lines {
+        for line in element_state.lines.iter() {
             let line_bottom = line_origin.y + line.size(line_height).height;
             if position.y > line_bottom {
                 line_origin.y = line_bottom;
@@ -874,7 +1190,7 @@ impl TextLayout {
         let mut line_origin = bounds.origin;
         let mut line_start_ix = 0;
 
-        for line in &element_state.lines {
+        for line in element_state.lines.iter() {
             let line_end_ix = line_start_ix + line.len();
             if index < line_start_ix {
                 break;
@@ -899,7 +1215,7 @@ impl TextLayout {
             .expect("measurement has not been performed");
         let mut line_start_ix = 0;
 
-        for line in &element_state.lines {
+        for line in element_state.lines.iter() {
             let line_end_ix = line_start_ix + line.len();
             if index < line_start_ix {
                 break;
@@ -1058,6 +1374,9 @@ impl InteractiveText {
 }
 
 impl Element for InteractiveText {
+    fn uses_retained_diff(&self) -> bool {
+        true
+    }
     type RequestLayoutState = ();
     type PrepaintState = Hitbox;
 
@@ -1283,6 +1602,89 @@ impl IntoElement for InteractiveText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_styled_text_diffs_runs_and_reuses_property_storage() {
+        let environment = EnvironmentDiff {
+            metrics: false,
+            text_layout: false,
+            text_paint: false,
+            composite: false,
+        };
+        let run = TextStyle::default().to_run(3);
+        let mut other = run.clone();
+        other.color = crate::red();
+        let mut text = StyledText::new("abcdef").with_runs(vec![run.clone(), other.clone()]);
+        let mut properties = text.retained_properties();
+        let allocation = properties.runs.as_ref().expect("runs").as_ptr();
+        assert_eq!(
+            text.update_retained_properties(&mut properties, &environment),
+            Damage::empty()
+        );
+
+        other.color = crate::rgb(0x00ff00).into();
+        text = text.with_runs(vec![run.clone(), other]);
+        assert_eq!(
+            text.update_retained_properties(&mut properties, &environment),
+            Damage::PAINT
+        );
+        assert_eq!(properties.runs.as_ref().expect("runs").as_ptr(), allocation);
+
+        text = text.with_runs(vec![run.clone(), run.clone()]);
+        assert_eq!(
+            text.update_retained_properties(&mut properties, &environment),
+            Damage::LAYOUT | Damage::PREPAINT | Damage::PAINT
+        );
+        let mut bold = run.clone();
+        bold.font.weight = crate::FontWeight::BOLD;
+        text = text.with_runs(vec![run.clone(), bold]);
+        assert_eq!(
+            text.update_retained_properties(&mut properties, &environment),
+            Damage::LAYOUT | Damage::PREPAINT | Damage::PAINT
+        );
+        assert_eq!(properties.runs.as_ref().expect("runs").as_ptr(), allocation);
+
+        let changed_text = StyledText::new("fedcba").with_runs(vec![run.clone(), run]);
+        assert_eq!(
+            StyledText::diff(
+                &properties,
+                &changed_text.retained_properties(),
+                &environment
+            ),
+            Damage::LAYOUT | Damage::PREPAINT | Damage::PAINT
+        );
+    }
+
+    #[test]
+    fn retained_text_shaping_rejects_changed_run_boundaries() {
+        use std::slice::from_ref;
+
+        let style = TextStyle::default();
+        let run = style.to_run(3);
+        let mut other = run.clone();
+        other.color = crate::rgb(0xff0000).into();
+        assert!(text_runs_have_same_shaping(
+            from_ref(&run),
+            from_ref(&other)
+        ));
+        assert!(!text_runs_have_same_shaping(
+            from_ref(&run),
+            &[run.clone(), run.clone()]
+        ));
+        assert!(!text_runs_have_same_shaping(
+            &[run.clone(), run.clone()],
+            from_ref(&run)
+        ));
+        assert!(!text_runs_have_same_shaping(
+            &[run.clone(), run.clone()],
+            &[run.clone(), other.clone()]
+        ));
+        let mut longer = run.clone();
+        longer.len += 1;
+        assert!(!text_runs_have_same_shaping(&[longer], from_ref(&run)));
+        other.font.weight = crate::FontWeight::BOLD;
+        assert!(!text_runs_have_same_shaping(&[other], &[run]));
+    }
 
     #[test]
     fn test_into_element_for() {

@@ -1195,15 +1195,16 @@ impl App {
         &mut self,
         callback: impl FnOnce(&mut App) -> R,
     ) -> (R, FxHashSet<EntityId>) {
-        let accessed_entities_start = self.entities.accessed_entities.get_mut().clone();
+        let accessed_entities_start = mem::take(self.entities.accessed_entities.get_mut());
         let result = callback(self);
-        let entities_accessed_in_callback = self
-            .entities
-            .accessed_entities
-            .get_mut()
-            .difference(&accessed_entities_start)
-            .copied()
-            .collect::<FxHashSet<EntityId>>();
+        // Each scope must record repeated reads as dependencies too, including
+        // reads already made by a sibling or an enclosing cached view.
+        let entities_accessed_in_callback = mem::replace(
+            self.entities.accessed_entities.get_mut(),
+            accessed_entities_start,
+        );
+        self.entities
+            .extend_accessed(&entities_accessed_in_callback);
         (result, entities_accessed_in_callback)
     }
 

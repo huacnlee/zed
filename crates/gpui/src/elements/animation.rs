@@ -1,6 +1,7 @@
 use scheduler::Instant;
 use std::{cell::Cell, rc::Rc, time::Duration};
 
+use crate::retained::Damage;
 use crate::{
     AnyElement, App, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
     ParentElement, SpringAnimation, SpringConfig, SpringPlayback, SpringState, SpringTarget,
@@ -9,6 +10,30 @@ use crate::{
 
 pub use easing::*;
 use smallvec::SmallVec;
+
+/// The rendering phases affected by an animation value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimationImpact {
+    /// The animation changes layout geometry.
+    Layout,
+    /// The animation changes painted content without changing geometry.
+    Paint,
+    /// The animation changes only the composed transform.
+    Transform,
+    /// The animation changes only composited properties such as opacity.
+    Composite,
+}
+
+impl AnimationImpact {
+    fn damage(self) -> Damage {
+        match self {
+            Self::Layout => Damage::LAYOUT | Damage::PREPAINT | Damage::PAINT,
+            Self::Paint => Damage::PAINT,
+            Self::Transform => Damage::TRANSFORM,
+            Self::Composite => Damage::COMPOSITE,
+        }
+    }
+}
 
 /// An animation that can be applied to an element.
 #[derive(Clone)]
@@ -25,6 +50,7 @@ pub struct Animation {
     /// The maximum number of times per second this animation re-renders.
     /// When `None`, the animation re-renders on every frame.
     pub max_fps: Option<f32>,
+    impact: Option<AnimationImpact>,
 }
 
 impl Animation {
@@ -37,6 +63,7 @@ impl Animation {
             synced: false,
             easing: Rc::new(linear),
             max_fps: None,
+            impact: None,
         }
     }
 
@@ -68,6 +95,14 @@ impl Animation {
     /// are ignored.
     pub fn with_max_fps(mut self, max_fps: f32) -> Self {
         self.max_fps = Some(max_fps);
+        self
+    }
+
+    /// Declares which rendering phase is affected by this animation.
+    ///
+    /// Animations without an explicit impact retain the conservative full-rebuild behavior.
+    pub fn with_impact(mut self, impact: AnimationImpact) -> Self {
+        self.impact = Some(impact);
         self
     }
 }
@@ -151,6 +186,7 @@ pub trait AnimationExt {
             animator: Some(Box::new(move |this, value| {
                 animator(this, target.resolve(value))
             })),
+            impact: None,
         }
     }
 }
@@ -175,6 +211,7 @@ pub struct SpringAnimationElement<E> {
     initial: Option<f32>,
     playback: SpringPlayback,
     animator: Option<Box<dyn FnOnce(E, f32) -> E + 'static>>,
+    impact: Option<AnimationImpact>,
 }
 
 impl<E: ParentElement> ParentElement for SpringAnimationElement<E> {
@@ -192,6 +229,12 @@ impl<E> SpringAnimationElement<E> {
     /// to the element being animated.
     pub fn map_element(mut self, f: impl FnOnce(E) -> E) -> SpringAnimationElement<E> {
         self.element = self.element.map(f);
+        self
+    }
+
+    /// Declares which rendering phase is affected by this spring animation.
+    pub fn with_impact(mut self, impact: AnimationImpact) -> Self {
+        self.impact = Some(impact);
         self
     }
 }
@@ -249,6 +292,10 @@ struct SpringElementState {
 }
 
 impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
+    fn uses_retained_diff(&self) -> bool {
+        self.impact.is_some()
+    }
+
     type RequestLayoutState = AnyElement;
     type PrepaintState = ();
 
@@ -268,7 +315,7 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
         cx: &mut App,
     ) -> (crate::LayoutId, Self::RequestLayoutState) {
         window.with_element_state(global_id.unwrap(), |state, window| {
-            let now = Instant::now();
+            let now = cx.background_executor().now();
             let initial = self.initial.unwrap_or(self.target);
             let mut state = state.unwrap_or_else(|| SpringElementState {
                 spring: SpringState {
@@ -345,6 +392,10 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
             let animator = self.animator.take().expect("should only be called once");
             let mut element = animator(element, state.spring.position).into_any_element();
 
+            if let Some(impact) = self.impact {
+                window.retained_tree.damage_current(impact.damage());
+            }
+
             if !done {
                 window.request_animation_frame();
             }
@@ -380,6 +431,12 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
 }
 
 impl<E: IntoElement + 'static> Element for AnimationElement<E> {
+    fn uses_retained_diff(&self) -> bool {
+        self.animations
+            .iter()
+            .all(|animation| animation.impact.is_some())
+    }
+
     type RequestLayoutState = AnyElement;
     type PrepaintState = ();
 
@@ -447,6 +504,10 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
 
             let element = self.element.take().expect("should only be called once");
             let mut element = (self.animator)(element, animation_ix, delta).into_any_element();
+
+            if let Some(impact) = self.animations[animation_ix].impact {
+                window.retained_tree.damage_current(impact.damage());
+            }
 
             if !done {
                 match self.animations[animation_ix].max_fps {
@@ -565,6 +626,56 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn animation_impacts_map_to_independent_retained_damage() {
+        assert_eq!(
+            AnimationImpact::Layout.damage(),
+            Damage::LAYOUT | Damage::PREPAINT | Damage::PAINT
+        );
+        assert_eq!(AnimationImpact::Paint.damage(), Damage::PAINT);
+        assert_eq!(AnimationImpact::Transform.damage(), Damage::TRANSFORM);
+        assert_eq!(AnimationImpact::Composite.damage(), Damage::COMPOSITE);
+    }
+
+    #[test]
+    fn animations_only_opt_in_when_every_phase_impact_is_declared() {
+        let conservative = div().with_animation(
+            "conservative",
+            Animation::new(Duration::from_secs(1)),
+            |element, _| element,
+        );
+        assert!(!conservative.uses_retained_diff());
+
+        let retained = div().with_animations(
+            "retained",
+            vec![
+                Animation::new(Duration::from_secs(1)).with_impact(AnimationImpact::Paint),
+                Animation::new(Duration::from_secs(1)).with_impact(AnimationImpact::Transform),
+            ],
+            |element, _, _| element,
+        );
+        assert!(retained.uses_retained_diff());
+
+        let mixed = div().with_animations(
+            "mixed",
+            vec![
+                Animation::new(Duration::from_secs(1)).with_impact(AnimationImpact::Paint),
+                Animation::new(Duration::from_secs(1)),
+            ],
+            |element, _, _| element,
+        );
+        assert!(!mixed.uses_retained_diff());
+
+        let spring = div()
+            .with_spring(
+                "spring",
+                SpringAnimation::new(SpringConfig::new(100., 10., 1.)).to(1.),
+                |element, _| element,
+            )
+            .with_impact(AnimationImpact::Composite);
+        assert!(spring.uses_retained_diff());
+    }
 
     struct AnimationTestView {
         rendered_deltas: Rc<RefCell<Vec<f32>>>,

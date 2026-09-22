@@ -39,6 +39,9 @@ impl From<bool> for PaddedBool32 {
 #[derive(Default)]
 #[expect(missing_docs)]
 pub struct Scene {
+    pub(crate) ordering_reused: usize,
+    ordering_cache: Option<OrderingCache>,
+    geometry_capture: Option<Vec<Primitive>>,
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
@@ -52,9 +55,39 @@ pub struct Scene {
     pub surfaces: Vec<PaintSurface>,
 }
 
+#[derive(Default)]
+struct OrderingCache {
+    entries: Vec<(Bounds<ScaledPixels>, DrawOrder)>,
+    cursor: usize,
+    tree_built: bool,
+}
+
+impl OrderingCache {
+    fn materialize(&mut self, tree: &mut BoundsTree<ScaledPixels>) {
+        if self.tree_built {
+            return;
+        }
+        // Ordering depends on the entire preceding bounds sequence, not just this
+        // primitive. Materialize the validated prefix before inserting changed bounds.
+        for (bounds, previous_order) in self.entries.iter().take(self.cursor) {
+            let order = tree.insert(*bounds);
+            debug_assert_eq!(order, *previous_order);
+        }
+        self.entries.truncate(self.cursor);
+        self.tree_built = true;
+    }
+}
+
 #[expect(missing_docs)]
 impl Scene {
     pub fn clear(&mut self) {
+        self.ordering_reused = 0;
+        if let Some(cache) = &mut self.ordering_cache {
+            cache.entries.truncate(cache.cursor);
+            cache.cursor = 0;
+            cache.tree_built = false;
+        }
+        self.geometry_capture = None;
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
@@ -72,8 +105,44 @@ impl Scene {
         self.paint_operations.len()
     }
 
-    pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
+    pub(crate) fn set_retained_ordering(&mut self, enabled: bool) {
+        if enabled {
+            // Direct element drawing can precede the window draw. Its unrecorded
+            // bounds must not become a missing prefix in a newly enabled cache.
+            if self.paint_operations.is_empty() {
+                self.ordering_cache
+                    .get_or_insert_with(OrderingCache::default);
+            }
+        } else if let Some(mut cache) = self.ordering_cache.take() {
+            cache.materialize(&mut self.primitive_bounds);
+            self.ordering_reused = 0;
+        }
+    }
+
+    fn insert_bounds(&mut self, bounds: Bounds<ScaledPixels>) -> DrawOrder {
+        let Some(cache) = &mut self.ordering_cache else {
+            return self.primitive_bounds.insert(bounds);
+        };
+        if !cache.tree_built {
+            if let Some((previous_bounds, order)) = cache.entries.get(cache.cursor)
+                && *previous_bounds == bounds
+            {
+                cache.cursor += 1;
+                self.ordering_reused += 1;
+                return *order;
+            }
+
+            cache.materialize(&mut self.primitive_bounds);
+            self.ordering_reused = 0;
+        }
         let order = self.primitive_bounds.insert(bounds);
+        cache.entries.push((bounds, order));
+        cache.cursor += 1;
+        order
+    }
+
+    pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
+        let order = self.insert_bounds(bounds);
         self.layer_stack.push(order);
         self.paint_operations
             .push(PaintOperation::StartLayer(bounds));
@@ -86,6 +155,9 @@ impl Scene {
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
+        if let Some(capture) = &mut self.geometry_capture {
+            capture.push(primitive.clone());
+        }
         let clipped_bounds = primitive
             .bounds()
             .intersect(&primitive.content_mask().bounds);
@@ -98,7 +170,7 @@ impl Scene {
             .layer_stack
             .last()
             .copied()
-            .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
+            .unwrap_or_else(|| self.insert_bounds(clipped_bounds));
         match &mut primitive {
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
@@ -146,6 +218,46 @@ impl Scene {
                 PaintOperation::EndLayer => self.pop_layer(),
             }
         }
+    }
+
+    pub(crate) fn is_geometry_range(&self, range: Range<usize>) -> bool {
+        self.retained_range_uses_atlas(range) == Some(false)
+    }
+
+    pub(crate) fn retained_range_uses_atlas(&self, range: Range<usize>) -> Option<bool> {
+        let operations = self.paint_operations.get(range)?;
+        let mut layers = 0usize;
+        let mut uses_atlas = false;
+        for operation in operations {
+            match operation {
+                PaintOperation::StartLayer(_) => layers += 1,
+                PaintOperation::EndLayer => {
+                    layers = layers.checked_sub(1)?;
+                }
+                PaintOperation::Primitive(
+                    Primitive::Shadow(_)
+                    | Primitive::Quad(_)
+                    | Primitive::Path(_)
+                    | Primitive::Underline(_),
+                ) => {}
+                PaintOperation::Primitive(
+                    Primitive::MonochromeSprite(_)
+                    | Primitive::SubpixelSprite(_)
+                    | Primitive::PolychromeSprite(_),
+                ) => uses_atlas = true,
+                PaintOperation::Primitive(_) => return None,
+            }
+        }
+        (layers == 0).then_some(uses_atlas)
+    }
+
+    pub(crate) fn begin_geometry_capture(&mut self) {
+        debug_assert!(self.geometry_capture.is_none());
+        self.geometry_capture = Some(Vec::new());
+    }
+
+    pub(crate) fn finish_geometry_capture(&mut self) -> Vec<Primitive> {
+        self.geometry_capture.take().unwrap_or_default()
     }
 
     pub fn finish(&mut self) {
@@ -945,5 +1057,125 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod retained_ordering_tests {
+    use super::*;
+    use crate::size;
+
+    fn bounds(left: f32, width: f32) -> Bounds<ScaledPixels> {
+        Bounds::new(
+            point(ScaledPixels(left), ScaledPixels(0.)),
+            size(ScaledPixels(width), ScaledPixels(10.)),
+        )
+    }
+
+    fn quad(left: f32) -> Quad {
+        Quad {
+            bounds: bounds(left, 10.),
+            content_mask: ContentMask {
+                bounds: bounds(0., 100.),
+            },
+            ..Quad::default()
+        }
+    }
+
+    #[test]
+    fn retained_ordering_rebuilds_prefix_before_changed_overlap() {
+        let mut scene = Scene::default();
+        scene.set_retained_ordering(true);
+        for (second_left, reused, expected) in [
+            (20., 0, [1, 1, 2, 3, 4, 3, 5]),
+            (20., 6, [1, 1, 2, 3, 4, 3, 5]),
+            (5., 0, [1, 2, 3, 4, 5, 4, 6]),
+            (5., 6, [1, 2, 3, 4, 5, 4, 6]),
+            (20., 0, [1, 1, 2, 3, 4, 3, 5]),
+        ] {
+            scene.clear();
+            scene.insert_primitive(quad(0.));
+            scene.insert_primitive(quad(second_left));
+            scene.insert_primitive(quad(5.));
+            scene.push_layer(bounds(0., 50.));
+            scene.insert_primitive(quad(0.));
+            scene.push_layer(bounds(20., 10.));
+            scene.insert_primitive(quad(20.));
+            scene.pop_layer();
+            scene.insert_primitive(quad(0.));
+            scene.pop_layer();
+            scene.insert_primitive(quad(25.));
+            assert_eq!(
+                scene
+                    .quads
+                    .iter()
+                    .map(|quad| quad.order)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(scene.ordering_reused, reused);
+        }
+    }
+
+    #[test]
+    fn retained_ordering_handles_removal_append_and_clip_changes() {
+        let mut scene = Scene::default();
+        scene.set_retained_ordering(true);
+        for (positions, clip_left, expected) in [
+            (vec![0., 20., 5.], 0., vec![1, 1, 2]),
+            (vec![0.], 0., vec![1]),
+            (vec![0., 20., 5., 8.], 0., vec![1, 1, 2, 3]),
+            (vec![0., 20., 5., 8.], 10., vec![1, 1, 2]),
+            (vec![], 0., vec![]),
+            (vec![0., 20., 5.], 0., vec![1, 1, 2]),
+        ] {
+            scene.clear();
+            for left in positions {
+                let mut primitive = quad(left);
+                primitive.content_mask.bounds = bounds(clip_left, 100.);
+                scene.insert_primitive(primitive);
+            }
+            assert_eq!(
+                scene
+                    .quads
+                    .iter()
+                    .map(|quad| quad.order)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn retained_ordering_switches_preserve_already_inserted_bounds() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(0.));
+        scene.set_retained_ordering(true);
+        scene.insert_primitive(quad(5.));
+        assert_eq!(
+            scene
+                .quads
+                .iter()
+                .map(|quad| quad.order)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        scene.clear();
+        scene.set_retained_ordering(true);
+        scene.insert_primitive(quad(0.));
+        scene.clear();
+        scene.insert_primitive(quad(0.));
+        assert_eq!(scene.ordering_reused, 1);
+        scene.set_retained_ordering(false);
+        scene.insert_primitive(quad(5.));
+        assert_eq!(
+            scene
+                .quads
+                .iter()
+                .map(|quad| quad.order)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(scene.ordering_reused, 0);
     }
 }

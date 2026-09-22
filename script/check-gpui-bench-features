@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for bench_features in bench-support bench-support,inspector; do
+    feature_tree="$(cargo tree -p gpui_platform --features "$bench_features" -e normal,build,dev,features)"
+    if rg -F 'feature "test-support"' <<< "$feature_tree"; then
+        echo 'GPUI production benchmarks must not enable test-support' >&2
+        exit 1
+    fi
+done

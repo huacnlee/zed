@@ -288,6 +288,10 @@ impl TextSystem {
         names
     }
 
+    pub(crate) fn font_generation(&self) -> usize {
+        self.font_generation.load(Ordering::Acquire)
+    }
+
     /// Add a font's data to the text system.
     ///
     /// Cached font resolution and line layouts are invalidated after installation.
