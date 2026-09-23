@@ -20,7 +20,7 @@ pub struct GlyphRasterData {
 }
 
 /// Set the text decoration for a run of text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecorationRun {
     /// The length of the run in utf-8 bytes.
     pub len: u32,
@@ -123,6 +123,20 @@ impl ShapedLine {
             cx,
             |_, origin, width, style, window| window.paint_underline(origin, width, style),
         )
+    }
+
+    /// Paint the line while allowing GPUI to reuse its glyph geometry when only its position or
+    /// clip changes between frames.
+    pub fn paint_retained(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        window.paint_retained_shaped_line(self, origin, line_height, align, align_width, cx)
     }
 
     /// Paint the line with a handler for each underline.

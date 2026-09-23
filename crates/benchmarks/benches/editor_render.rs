@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc};
 
 use benchmarks::bench_utils::random_rust_file;
 use editor::{
@@ -174,6 +174,53 @@ fn editor_render(cx: &mut BenchAppContext) {
         }
         move_down = !move_down;
     });
+}
+
+#[gpui::bench(fps = 120)]
+fn editor_scroll(cx: &mut BenchAppContext) {
+    init_context(cx);
+
+    let buffer = cx.update(|cx| {
+        let text = (0..10_000)
+            .map(|line| format!("fn line_{line:05}() {{ println!(\"{line}\"); }}\n"))
+            .collect::<String>();
+        MultiBuffer::build_simple(&text, cx)
+    });
+
+    let mut window = cx.add_empty_window();
+    let editor = window.update(|window, cx| {
+        let editor = window.replace_root(cx, |window, cx| {
+            let mut editor = Editor::new(EditorMode::full(), buffer, None, window, cx);
+            editor.set_style(editor::EditorStyle::default(), window, cx);
+            editor
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+        editor
+    });
+    cx.run_until_idle();
+
+    let frames_before = window.update(|window, _| window.frame_duration_snapshot());
+    let updates = Rc::new(Cell::new(0usize));
+    cx.bench_renderer(editor, {
+        let updates = updates.clone();
+        move |editor, window, cx| {
+            let update = updates.get().saturating_add(1);
+            updates.set(update);
+            let phase = update % 40;
+            let distance = if phase < 20 { phase } else { 40 - phase };
+            let scroll_top = 2_000. + distance as f64;
+            editor.set_scroll_position(gpui::Point::new(0., scroll_top), window, cx);
+        }
+    });
+    let frames_after = window.update(|window, _| window.frame_duration_snapshot());
+    let retained = window.update(|window, _| window.retained_frame_snapshot());
+    assert!(updates.get() > 0);
+    assert!(
+        frames_after.draw_duration_histogram.len() - frames_before.draw_duration_histogram.len()
+            >= updates.get() as u64
+    );
+    let retained_enabled = std::env::var("GPUI_RETAINED_TREE").is_ok_and(|value| value == "1");
+    assert_eq!(retained.enabled, retained_enabled);
 }
 
 #[gpui::bench]
@@ -453,6 +500,7 @@ gpui::bench_group!(
     editor_multi_cursor_input,
     open_editor_with_one_long_line,
     editor_render,
+    editor_scroll,
     editor_render_with_editorconfig,
     editor_render_highlighted,
     editor_render_highlighted_minimap

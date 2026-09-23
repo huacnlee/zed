@@ -99,8 +99,14 @@ pub struct RetainedFrameSnapshot {
     pub snapshots_evicted: usize,
     /// Layout nodes reused during the last frame.
     pub layout_reused: usize,
+    /// Retained nodes reconciled during the last frame.
+    pub nodes_reconciled: usize,
+    /// Prepaint snapshots reused during the last frame.
+    pub prepaint_reused: usize,
     /// Paint ranges replayed during the last frame.
     pub paint_replayed: usize,
+    /// Nodes updated using transform-only composition during the last frame.
+    pub transform_only: usize,
 }
 
 pub(crate) struct RetainedElementTree {
@@ -174,8 +180,16 @@ impl RetainedElementTree {
             snapshot_bytes: self.stats.snapshot_bytes,
             snapshots_evicted: self.stats.snapshots_evicted,
             layout_reused: self.stats.layout_reused,
+            nodes_reconciled: self.stats.nodes_reconciled,
+            prepaint_reused: self.stats.prepaint_reused,
             paint_replayed: self.stats.paint_replayed,
+            transform_only: self.stats.transform_only,
         }
+    }
+
+    #[cfg(feature = "bench-support")]
+    pub(super) fn set_bench_snapshot_budget(&mut self, bytes: usize) {
+        self.budget.max_snapshot_bytes = bytes;
     }
 
     fn new(enabled: bool) -> Self {

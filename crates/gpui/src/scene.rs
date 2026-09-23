@@ -210,12 +210,140 @@ impl Scene {
             .push(PaintOperation::Primitive(primitive));
     }
 
+    pub(crate) fn insert_retained_layer(
+        &mut self,
+        bounds: Bounds<ScaledPixels>,
+        primitives: impl IntoIterator<Item = Primitive>,
+    ) {
+        let order = self.insert_bounds(bounds);
+        let starts = RetainedLayerRanges {
+            shadows: self.shadows.len()..self.shadows.len(),
+            quads: self.quads.len()..self.quads.len(),
+            paths: self.paths.len()..self.paths.len(),
+            underlines: self.underlines.len()..self.underlines.len(),
+            monochrome_sprites: self.monochrome_sprites.len()..self.monochrome_sprites.len(),
+            subpixel_sprites: self.subpixel_sprites.len()..self.subpixel_sprites.len(),
+            polychrome_sprites: self.polychrome_sprites.len()..self.polychrome_sprites.len(),
+            surfaces: self.surfaces.len()..self.surfaces.len(),
+        };
+        for primitive in primitives {
+            if let Some(capture) = &mut self.geometry_capture {
+                capture.push(primitive.clone());
+            }
+            match primitive {
+                Primitive::Shadow(mut primitive) => {
+                    primitive.order = order;
+                    self.shadows.push(primitive);
+                }
+                Primitive::Quad(mut primitive) => {
+                    primitive.order = order;
+                    self.quads.push(primitive);
+                }
+                Primitive::Path(mut primitive) => {
+                    primitive.order = order;
+                    primitive.id = PathId(self.paths.len());
+                    self.paths.push(primitive);
+                }
+                Primitive::Underline(mut primitive) => {
+                    primitive.order = order;
+                    self.underlines.push(primitive);
+                }
+                Primitive::MonochromeSprite(mut primitive) => {
+                    primitive.order = order;
+                    self.monochrome_sprites.push(primitive);
+                }
+                Primitive::SubpixelSprite(mut primitive) => {
+                    primitive.order = order;
+                    self.subpixel_sprites.push(primitive);
+                }
+                Primitive::PolychromeSprite(mut primitive) => {
+                    primitive.order = order;
+                    self.polychrome_sprites.push(primitive);
+                }
+                Primitive::Surface(mut primitive) => {
+                    primitive.order = order;
+                    self.surfaces.push(primitive);
+                }
+            }
+        }
+        let ranges = RetainedLayerRanges {
+            shadows: starts.shadows.start..self.shadows.len(),
+            quads: starts.quads.start..self.quads.len(),
+            paths: starts.paths.start..self.paths.len(),
+            underlines: starts.underlines.start..self.underlines.len(),
+            monochrome_sprites: starts.monochrome_sprites.start..self.monochrome_sprites.len(),
+            subpixel_sprites: starts.subpixel_sprites.start..self.subpixel_sprites.len(),
+            polychrome_sprites: starts.polychrome_sprites.start..self.polychrome_sprites.len(),
+            surfaces: starts.surfaces.start..self.surfaces.len(),
+        };
+        self.paint_operations
+            .push(PaintOperation::RetainedLayer { bounds, ranges });
+    }
+
+    fn replay_retained_layer(
+        &mut self,
+        bounds: Bounds<ScaledPixels>,
+        ranges: &RetainedLayerRanges,
+        previous: &Scene,
+    ) {
+        let primitives = previous.shadows[ranges.shadows.clone()]
+            .iter()
+            .copied()
+            .map(Primitive::Shadow)
+            .chain(
+                previous.quads[ranges.quads.clone()]
+                    .iter()
+                    .copied()
+                    .map(Primitive::Quad),
+            )
+            .chain(
+                previous.paths[ranges.paths.clone()]
+                    .iter()
+                    .cloned()
+                    .map(Primitive::Path),
+            )
+            .chain(
+                previous.underlines[ranges.underlines.clone()]
+                    .iter()
+                    .copied()
+                    .map(Primitive::Underline),
+            )
+            .chain(
+                previous.monochrome_sprites[ranges.monochrome_sprites.clone()]
+                    .iter()
+                    .copied()
+                    .map(Primitive::MonochromeSprite),
+            )
+            .chain(
+                previous.subpixel_sprites[ranges.subpixel_sprites.clone()]
+                    .iter()
+                    .copied()
+                    .map(Primitive::SubpixelSprite),
+            )
+            .chain(
+                previous.polychrome_sprites[ranges.polychrome_sprites.clone()]
+                    .iter()
+                    .copied()
+                    .map(Primitive::PolychromeSprite),
+            )
+            .chain(
+                previous.surfaces[ranges.surfaces.clone()]
+                    .iter()
+                    .cloned()
+                    .map(Primitive::Surface),
+            );
+        self.insert_retained_layer(bounds, primitives);
+    }
+
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::RetainedLayer { bounds, ranges } => {
+                    self.replay_retained_layer(*bounds, ranges, prev_scene)
+                }
             }
         }
     }
@@ -246,6 +374,14 @@ impl Scene {
                     | Primitive::PolychromeSprite(_),
                 ) => uses_atlas = true,
                 PaintOperation::Primitive(_) => return None,
+                PaintOperation::RetainedLayer { ranges, .. } => {
+                    uses_atlas |= !ranges.monochrome_sprites.is_empty()
+                        || !ranges.subpixel_sprites.is_empty()
+                        || !ranges.polychrome_sprites.is_empty();
+                    if !ranges.surfaces.is_empty() {
+                        return None;
+                    }
+                }
             }
         }
         (layers == 0).then_some(uses_atlas)
@@ -327,6 +463,21 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+    RetainedLayer {
+        bounds: Bounds<ScaledPixels>,
+        ranges: RetainedLayerRanges,
+    },
+}
+
+pub(crate) struct RetainedLayerRanges {
+    shadows: Range<usize>,
+    quads: Range<usize>,
+    paths: Range<usize>,
+    underlines: Range<usize>,
+    monochrome_sprites: Range<usize>,
+    subpixel_sprites: Range<usize>,
+    polychrome_sprites: Range<usize>,
+    surfaces: Range<usize>,
 }
 
 #[derive(Clone)]
@@ -1177,5 +1328,22 @@ mod retained_ordering_tests {
             [1, 2]
         );
         assert_eq!(scene.ordering_reused, 0);
+    }
+
+    #[test]
+    fn retained_layer_records_one_replay_operation() {
+        let mut scene = Scene::default();
+        let primitives: Vec<_> = (0..100)
+            .map(|index| Primitive::Quad(quad(index as f32)))
+            .collect();
+        scene.insert_retained_layer(bounds(0., 200.), primitives);
+
+        assert_eq!(scene.paint_operations.len(), 1);
+        assert_eq!(scene.quads.len(), 100);
+
+        let mut replayed = Scene::default();
+        replayed.replay(0..1, &scene);
+        assert_eq!(replayed.paint_operations.len(), 1);
+        assert_eq!(replayed.quads.len(), 100);
     }
 }

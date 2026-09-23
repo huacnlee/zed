@@ -3172,7 +3172,7 @@ impl Window {
 
     /// Floors the near edge and ceils the far edge, producing a strict superset of the raw region.
     #[inline]
-    fn cover_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<ScaledPixels> {
+    pub(crate) fn cover_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<ScaledPixels> {
         let scale_factor = self.scale_factor();
         let left = floor_to_device_pixel(bounds.left().0, scale_factor);
         let top = floor_to_device_pixel(bounds.top().0, scale_factor);
@@ -5152,6 +5152,12 @@ impl Window {
     #[cfg(feature = "bench-support")]
     pub fn retained_frame_snapshot(&self) -> crate::RetainedFrameSnapshot {
         self.retained_tree.bench_snapshot()
+    }
+
+    /// Overrides the retained replay-snapshot budget for production benchmarks.
+    #[cfg(feature = "bench-support")]
+    pub fn set_retained_snapshot_budget(&mut self, bytes: usize) {
+        self.retained_tree.set_bench_snapshot_budget(bytes);
     }
 
     pub(crate) fn can_reuse_retained_prepaint(&self) -> bool {

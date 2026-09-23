@@ -1,10 +1,10 @@
 use super::Damage;
-use crate::text_system::LineLayoutIndex;
+use crate::text_system::{DecorationRun, LineLayoutIndex};
 use crate::{
     AbsoluteLength, App, AtlasGeneration, BorderStyle, Bounds, BoxShadow, ContentMask, Corners,
-    Edges, Fill, Hsla, ImageId, Pixels, Point, Primitive, RenderImage, ScaledPixels, SharedString,
-    Style, TextRenderingMode, TextStyle, TransformationMatrix, Window, WindowBackgroundAppearance,
-    WrappedLine,
+    Edges, Fill, Hsla, ImageId, LineLayout, Pixels, Point, Primitive, RenderImage, ScaledPixels,
+    ShapedLine, SharedString, Style, TextAlign, TextRenderingMode, TextStyle, TransformationMatrix,
+    Window, WindowBackgroundAppearance, WrappedLine,
 };
 use smallvec::SmallVec;
 use std::{ops::Range, rc::Rc, sync::Arc};
@@ -26,6 +26,7 @@ struct PaintEnvironment {
 enum PaintProperties {
     Canvas(u64),
     Text(TextProperties),
+    ShapedLine(ShapedLineProperties),
     Background(DecorationProperties),
     Border(DecorationProperties),
     Svg {
@@ -46,6 +47,25 @@ enum PaintProperties {
 struct TextProperties {
     lines: Rc<SmallVec<[WrappedLine; 1]>>,
     line_height: Pixels,
+}
+
+#[derive(Clone)]
+struct ShapedLineProperties {
+    layout: Arc<LineLayout>,
+    decoration_runs: SmallVec<[DecorationRun; 32]>,
+    line_height: Pixels,
+    align: TextAlign,
+    align_width: Option<Pixels>,
+}
+
+impl PartialEq for ShapedLineProperties {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.layout, &other.layout)
+            && self.decoration_runs == other.decoration_runs
+            && self.line_height == other.line_height
+            && self.align == other.align
+            && self.align_width == other.align_width
+    }
 }
 
 impl PartialEq for TextProperties {
@@ -84,6 +104,7 @@ impl PaintSnapshot {
         let properties = match &self.environment.properties {
             PaintProperties::Canvas(_)
             | PaintProperties::Text(_)
+            | PaintProperties::ShapedLine(_)
             | PaintProperties::Svg { .. }
             | PaintProperties::Image { .. } => 0,
             PaintProperties::Background(properties) | PaintProperties::Border(properties) => {
@@ -120,6 +141,31 @@ impl PaintEnvironment {
     }
 }
 
+fn reusable_snapshot_index(
+    snapshots: &[PaintSnapshot],
+    environment: &PaintEnvironment,
+    generation: u64,
+    atlas_generation: Option<AtlasGeneration>,
+    transform_enabled: bool,
+    refreshing: bool,
+    mut output_is_valid: impl FnMut(&PaintSnapshot) -> bool,
+) -> Option<usize> {
+    snapshots.iter().position(|snapshot| {
+        !refreshing
+            && snapshot.generation.wrapping_add(1) == generation
+            && snapshot
+                .resource_generation
+                .is_none_or(|expected| Some(expected) == atlas_generation)
+            && match &snapshot.output {
+                PaintOutput::Geometry(_) if transform_enabled => {
+                    environment.matches_translated(&snapshot.environment)
+                }
+                _ => snapshot.environment == *environment,
+            }
+            && output_is_valid(snapshot)
+    })
+}
+
 fn translate_geometry(
     primitive: &mut Primitive,
     offset: Point<ScaledPixels>,
@@ -139,7 +185,53 @@ fn translate_geometry(
                 shadow.content_mask = clip;
             }
         }
-        _ => return false,
+        Primitive::Path(path) => {
+            path.bounds.origin += offset;
+            path.content_mask = clip.unwrap_or_else(|| {
+                path.content_mask.bounds.origin += offset;
+                path.content_mask
+            });
+            for vertex in &mut path.vertices {
+                vertex.xy_position += offset;
+                vertex.content_mask = clip.unwrap_or_else(|| {
+                    vertex.content_mask.bounds.origin += offset;
+                    vertex.content_mask
+                });
+            }
+        }
+        Primitive::Underline(underline) => {
+            underline.bounds.origin += offset;
+            if let Some(clip) = clip {
+                underline.content_mask = clip;
+            } else {
+                underline.content_mask.bounds.origin += offset;
+            }
+        }
+        Primitive::MonochromeSprite(sprite) => {
+            sprite.bounds.origin += offset;
+            if let Some(clip) = clip {
+                sprite.content_mask = clip;
+            } else {
+                sprite.content_mask.bounds.origin += offset;
+            }
+        }
+        Primitive::SubpixelSprite(sprite) => {
+            sprite.bounds.origin += offset;
+            if let Some(clip) = clip {
+                sprite.content_mask = clip;
+            } else {
+                sprite.content_mask.bounds.origin += offset;
+            }
+        }
+        Primitive::PolychromeSprite(sprite) => {
+            sprite.bounds.origin += offset;
+            if let Some(clip) = clip {
+                sprite.content_mask = clip;
+            } else {
+                sprite.content_mask.bounds.origin += offset;
+            }
+        }
+        Primitive::Surface(_) => return false,
     }
     true
 }
@@ -253,6 +345,34 @@ impl Window {
         );
     }
 
+    pub(crate) fn paint_retained_shaped_line(
+        &mut self,
+        line: &ShapedLine,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
+        if !self.retained_tree.active || !self.retained_tree.paint_enabled {
+            return line.paint(origin, line_height, align, align_width, self, cx);
+        }
+        let properties = PaintProperties::ShapedLine(ShapedLineProperties {
+            layout: line.layout.clone(),
+            decoration_runs: line.decoration_runs.clone(),
+            line_height,
+            align,
+            align_width,
+        });
+        let bounds = Bounds::new(origin, crate::size(line.width(), line_height));
+        let mut result = Ok(());
+        self.paint_retained_output(properties, bounds, cx, |window, cx| {
+            result = line.paint(origin, line_height, align, align_width, window, cx);
+            result.is_ok()
+        });
+        result
+    }
+
     pub(crate) fn paint_retained_background(
         &mut self,
         style: &Style,
@@ -335,19 +455,25 @@ impl Window {
         }
         let text = matches!(
             &properties,
-            PaintProperties::Canvas(_) | PaintProperties::Text(_)
+            PaintProperties::Canvas(_) | PaintProperties::Text(_) | PaintProperties::ShapedLine(_)
         );
         let sprite = matches!(
             &properties,
             PaintProperties::Svg { .. } | PaintProperties::Image { .. }
         );
+        let transformed_text = matches!(
+            &properties,
+            PaintProperties::Text(_) | PaintProperties::ShapedLine(_)
+        );
+        let measured_text = matches!(&properties, PaintProperties::Text(_));
         let text_style = text.then(|| (self.text_style(), cx.text_system().font_generation()));
         let atlas_generation = if text || sprite {
             self.atlas_generation()
         } else {
             None
         };
-        let capture_background = matches!(&properties, PaintProperties::Background(_));
+        let capture_geometry = matches!(&properties, PaintProperties::Background(_))
+            || (self.retained_tree.transform_enabled && transformed_text);
         let environment = PaintEnvironment {
             properties,
             bounds,
@@ -360,41 +486,40 @@ impl Window {
             active: self.is_window_active(),
         };
         let generation = self.retained_tree.generation;
-        let previous = node_id
-            .and_then(|id| self.retained_tree.nodes.get_mut(id))
+        let previous_index = node_id
+            .and_then(|id| self.retained_tree.nodes.get(id))
             .and_then(|node| {
-                let index = node.paint_snapshots.iter().position(|snapshot| {
-                    std::mem::discriminant(&snapshot.environment.properties)
-                        == std::mem::discriminant(&environment.properties)
-                })?;
-                Some(node.paint_snapshots.swap_remove(index))
-            })
-            .filter(|snapshot| {
-                !self.refreshing
-                    && snapshot.generation.wrapping_add(1) == generation
-                    && snapshot
-                        .resource_generation
-                        .is_none_or(|expected| Some(expected) == atlas_generation)
-                    && match &snapshot.output {
-                        PaintOutput::Geometry(_) if self.retained_tree.transform_enabled => {
-                            environment.matches_translated(&snapshot.environment)
+                reusable_snapshot_index(
+                    &node.paint_snapshots,
+                    &environment,
+                    generation,
+                    atlas_generation,
+                    self.retained_tree.transform_enabled,
+                    self.refreshing,
+                    |snapshot| match &snapshot.output {
+                        PaintOutput::FrameRange(range) => {
+                            if snapshot.resource_generation.is_some() {
+                                self.rendered_frame
+                                    .scene
+                                    .retained_range_uses_atlas(range.clone())
+                                    == Some(true)
+                            } else {
+                                self.rendered_frame.scene.is_geometry_range(range.clone())
+                            }
                         }
-                        _ => snapshot.environment == environment,
-                    }
-            })
-            .filter(|snapshot| match &snapshot.output {
-                PaintOutput::FrameRange(range) => {
-                    if snapshot.resource_generation.is_some() {
-                        self.rendered_frame
-                            .scene
-                            .retained_range_uses_atlas(range.clone())
-                            == Some(true)
-                    } else {
-                        self.rendered_frame.scene.is_geometry_range(range.clone())
-                    }
-                }
-                PaintOutput::Geometry(_) => true,
+                        PaintOutput::Geometry(_) => true,
+                    },
+                )
             });
+        let previous = node_id
+            .zip(previous_index)
+            .and_then(|(id, index)| {
+                self.retained_tree
+                    .nodes
+                    .get_mut(id)
+                    .map(|node| (node, index))
+            })
+            .map(|(node, index)| node.paint_snapshots.swap_remove(index));
         let start = self.paint_index();
         let text_start = text.then(|| self.text_system().layout_index());
         let mut geometry = None;
@@ -422,10 +547,31 @@ impl Window {
                 PaintOutput::Geometry(primitives) => {
                     let offset = bounds.origin.scale(environment.scale_factor);
                     let clip = self.snapped_content_mask();
-                    for primitive in &primitives {
-                        let mut primitive = primitive.clone();
-                        if translate_geometry(&mut primitive, offset, Some(clip)) {
-                            self.next_frame.scene.insert_primitive(primitive);
+                    if matches!(
+                        snapshot.environment.properties,
+                        PaintProperties::Text(_) | PaintProperties::ShapedLine(_)
+                    ) {
+                        let translated = primitives.iter().filter_map(|primitive| {
+                            let mut primitive = primitive.clone();
+                            if translate_geometry(&mut primitive, offset, Some(clip)) {
+                                Some(primitive)
+                            } else {
+                                None
+                            }
+                        });
+                        let clipped_bounds = bounds.intersect(&self.content_mask().bounds);
+                        if !clipped_bounds.is_empty() {
+                            let layer_bounds = self.cover_bounds(clipped_bounds);
+                            self.next_frame
+                                .scene
+                                .insert_retained_layer(layer_bounds, translated);
+                        }
+                    } else {
+                        for primitive in &primitives {
+                            let mut primitive = primitive.clone();
+                            if translate_geometry(&mut primitive, offset, Some(clip)) {
+                                self.next_frame.scene.insert_primitive(primitive);
+                            }
                         }
                     }
                     geometry = Some(primitives);
@@ -434,16 +580,26 @@ impl Window {
             self.retained_tree.stats.paint_replayed += 1;
         } else {
             self.retained_tree.damage_current(Damage::PAINT);
-            if capture_background {
+            if capture_geometry {
                 self.next_frame.scene.begin_geometry_capture();
             }
             cacheable = paint(self, cx);
-            if capture_background {
+            if capture_geometry {
                 let mut primitives = self.next_frame.scene.finish_geometry_capture();
                 let offset = Point::default() - bounds.origin.scale(environment.scale_factor);
-                if primitives
-                    .iter_mut()
-                    .all(|primitive| translate_geometry(primitive, offset, None))
+                let safe_text_layer = !measured_text
+                    || primitives.iter().all(|primitive| {
+                        matches!(
+                            primitive,
+                            Primitive::MonochromeSprite(_)
+                                | Primitive::SubpixelSprite(_)
+                                | Primitive::PolychromeSprite(_)
+                        )
+                    });
+                if safe_text_layer
+                    && primitives
+                        .iter_mut()
+                        .all(|primitive| translate_geometry(primitive, offset, None))
                 {
                     geometry = Some(primitives);
                 }
@@ -485,7 +641,10 @@ impl Window {
 mod tests {
     use super::*;
     use crate::retained::RetainedElementTree;
-    use crate::{Primitive, Quad, Scene, scene::PaintOperation};
+    use crate::{
+        AtlasTextureId, AtlasTextureKind, AtlasTile, MonochromeSprite, Primitive, Quad, Scene,
+        TileId, point, scene::PaintOperation,
+    };
     use std::any::TypeId;
 
     fn snapshot(generation: u64, primitives: usize) -> PaintSnapshot {
@@ -597,5 +756,71 @@ mod tests {
         assert!(!scene.is_geometry_range(0..2));
         assert!(!scene.is_geometry_range(1..3));
         assert!(!scene.is_geometry_range(0..4));
+    }
+
+    #[test]
+    fn translated_text_sprite_uses_new_origin_and_clip() {
+        let old_clip = ContentMask {
+            bounds: Bounds::new(
+                point(ScaledPixels(2.), ScaledPixels(3.)),
+                Default::default(),
+            ),
+        };
+        let new_clip = ContentMask {
+            bounds: Bounds::new(
+                point(ScaledPixels(20.), ScaledPixels(30.)),
+                Default::default(),
+            ),
+        };
+        let mut primitive = Primitive::MonochromeSprite(MonochromeSprite {
+            order: 0,
+            pad: 0,
+            bounds: Bounds::new(
+                point(ScaledPixels(4.), ScaledPixels(5.)),
+                Default::default(),
+            ),
+            content_mask: old_clip,
+            color: Default::default(),
+            tile: AtlasTile {
+                texture_id: AtlasTextureId {
+                    index: 0,
+                    kind: AtlasTextureKind::Monochrome,
+                },
+                tile_id: TileId(0),
+                padding: 0,
+                bounds: Default::default(),
+            },
+            transformation: Default::default(),
+        });
+
+        assert!(translate_geometry(
+            &mut primitive,
+            point(ScaledPixels(7.), ScaledPixels(11.)),
+            Some(new_clip),
+        ));
+        let Primitive::MonochromeSprite(sprite) = primitive else {
+            panic!("expected monochrome sprite");
+        };
+        assert_eq!(
+            sprite.bounds.origin,
+            point(ScaledPixels(11.), ScaledPixels(16.))
+        );
+        assert_eq!(sprite.content_mask, new_clip);
+    }
+
+    #[test]
+    fn reusable_snapshot_matches_full_paint_environment() {
+        let mut first = snapshot(4, 1);
+        first.environment.properties = PaintProperties::Canvas(1);
+        let mut second = snapshot(4, 1);
+        second.environment.properties = PaintProperties::Canvas(2);
+        let snapshots = vec![first, second];
+        let mut environment = snapshots[1].environment.clone();
+        environment.bounds.origin.x += crate::px(10.);
+
+        assert_eq!(
+            reusable_snapshot_index(&snapshots, &environment, 5, None, true, false, |_| true),
+            Some(1)
+        );
     }
 }

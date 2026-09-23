@@ -8031,7 +8031,7 @@ impl LineWithInvisibles {
                         )
                         .log_err();
                     } else {
-                        line.paint(
+                        line.paint_retained(
                             fragment_origin,
                             line_height,
                             TextAlign::Left,

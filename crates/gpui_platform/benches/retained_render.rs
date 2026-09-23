@@ -1,7 +1,8 @@
 use gpui::{
     BenchAppContext, Context, InputEvent, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, RenderImage, Styled as _, Window,
-    div, img, point, px, rgb, svg,
+    MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, RenderImage, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, UniformListScrollHandle, Window,
+    div, img, point, px, rgb, svg, uniform_list,
 };
 use std::{cell::Cell, fmt, rc::Rc, sync::Arc, time::Duration};
 
@@ -181,7 +182,7 @@ fn frames(workload: &Workload, cx: &mut BenchAppContext) {
     });
     cx.run_until_idle();
     let frames_before = window.update(|window, _| window.frame_duration_snapshot());
-    let mut updates = 0;
+    let mut updates: usize = 0;
     cx.bench_renderer(view, |view, _, cx| {
         view.revision += 1;
         updates += 1;
@@ -239,6 +240,228 @@ fn frames(workload: &Workload, cx: &mut BenchAppContext) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ScrollWorkload {
+    nodes: usize,
+}
+
+impl fmt::Display for ScrollWorkload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.nodes)
+    }
+}
+
+fn scroll_workloads() -> Vec<ScrollWorkload> {
+    [100, 1_000, 10_000]
+        .into_iter()
+        .map(|nodes| ScrollWorkload { nodes })
+        .collect()
+}
+
+struct ScrollingGrid {
+    nodes: usize,
+    scroll: ScrollHandle,
+    rendered_frames: Rc<Cell<usize>>,
+}
+
+impl Render for ScrollingGrid {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.rendered_frames
+            .set(self.rendered_frames.get().saturating_add(1));
+        div()
+            .id("scroll-benchmark")
+            .flex()
+            .flex_col()
+            .w(px(800.))
+            .h(px(600.))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .children((0..self.nodes).map(|index| {
+                div().id(index).w_full().h(px(20.)).flex_shrink_0().bg(rgb(
+                    if index.is_multiple_of(2) {
+                        0x224466
+                    } else {
+                        0x335577
+                    },
+                ))
+            }))
+    }
+}
+
+#[gpui::bench(
+    inputs = scroll_workloads(),
+    input_name = "nodes",
+    group = "retained_scroll",
+    fps = 120
+)]
+fn scroll_frames(workload: &ScrollWorkload, cx: &mut BenchAppContext) {
+    assert!(!cfg!(debug_assertions), "use --profile release-fast");
+    let rendered_frames = Rc::new(Cell::new(0));
+    let scroll = ScrollHandle::new();
+    let mut window = cx.add_empty_window();
+    if let Some(bytes) = std::env::var("GPUI_BENCH_RETAINED_SNAPSHOT_BUDGET_MB")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(|megabytes| megabytes.checked_mul(1024 * 1024))
+    {
+        window.update(|window, _| window.set_retained_snapshot_budget(bytes));
+    }
+    let view = window.update(|window, cx| {
+        window.replace_root(cx, |_, _| ScrollingGrid {
+            nodes: workload.nodes,
+            scroll: scroll.clone(),
+            rendered_frames: rendered_frames.clone(),
+        })
+    });
+    cx.run_until_idle();
+    let max_offset = scroll.max_offset().y;
+    assert!(max_offset > px(0.));
+    let frames_before = window.update(|window, _| window.frame_duration_snapshot());
+    let mut updates: usize = 0;
+    cx.bench_renderer(view, |view, _, cx| {
+        updates += 1;
+        let offset = if updates.is_multiple_of(2) {
+            px(0.)
+        } else {
+            -max_offset
+        };
+        view.scroll.set_offset(point(px(0.), offset));
+        cx.notify();
+    });
+    let frames_after = window.update(|window, _| window.frame_duration_snapshot());
+    let retained = window.update(|window, _| window.retained_frame_snapshot());
+    assert!(updates > 0);
+    assert_eq!(rendered_frames.get(), updates + 1);
+    assert_eq!(
+        scroll.offset().y,
+        if updates.is_multiple_of(2) {
+            px(0.)
+        } else {
+            -max_offset
+        }
+    );
+    assert_eq!(
+        frames_after.draw_duration_histogram.len() - frames_before.draw_duration_histogram.len(),
+        updates as u64
+    );
+    let retained_enabled = std::env::var("GPUI_RETAINED_TREE").is_ok_and(|value| value == "1");
+    assert_eq!(retained.enabled, retained_enabled);
+    if retained_enabled {
+        assert!(retained.layout_reused >= workload.nodes, "{retained:?}");
+        assert!(
+            retained.transform_only + retained.snapshots_evicted >= workload.nodes,
+            "{retained:?}"
+        );
+        assert!(retained.nodes_reconciled >= workload.nodes, "{retained:?}");
+    }
+}
+
+struct UniformScrollingGrid {
+    nodes: usize,
+    scroll: UniformListScrollHandle,
+    rendered_frames: Rc<Cell<usize>>,
+    rendered_items: Rc<Cell<usize>>,
+    labels: Arc<Vec<SharedString>>,
+}
+
+impl Render for UniformScrollingGrid {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.rendered_frames
+            .set(self.rendered_frames.get().saturating_add(1));
+        let rendered_items = self.rendered_items.clone();
+        let labels = self.labels.clone();
+        uniform_list(
+            "uniform-scroll-benchmark",
+            self.nodes,
+            move |range, _, _| {
+                rendered_items.set(
+                    rendered_items
+                        .get()
+                        .saturating_add(range.end.saturating_sub(range.start)),
+                );
+                range
+                    .map(|index| {
+                        div()
+                            .id(index)
+                            .w_full()
+                            .h(px(20.))
+                            .bg(rgb(if index.is_multiple_of(2) {
+                                0x224466
+                            } else {
+                                0x335577
+                            }))
+                            .child(labels[index].clone())
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.scroll)
+        .w(px(800.))
+        .h(px(600.))
+    }
+}
+
+#[gpui::bench(
+    inputs = scroll_workloads(),
+    input_name = "nodes",
+    group = "retained_uniform_scroll",
+    fps = 120
+)]
+fn uniform_scroll_frames(workload: &ScrollWorkload, cx: &mut BenchAppContext) {
+    assert!(!cfg!(debug_assertions), "use --profile release-fast");
+    let rendered_frames = Rc::new(Cell::new(0));
+    let rendered_items = Rc::new(Cell::new(0));
+    let scroll = UniformListScrollHandle::new();
+    let labels = Arc::new(
+        (0..workload.nodes)
+            .map(|index| SharedString::from(format!("Command Palette Item {index}")))
+            .collect::<Vec<_>>(),
+    );
+    let mut window = cx.add_empty_window();
+    let view = window.update(|window, cx| {
+        window.replace_root(cx, |_, _| UniformScrollingGrid {
+            nodes: workload.nodes,
+            scroll: scroll.clone(),
+            rendered_frames: rendered_frames.clone(),
+            rendered_items: rendered_items.clone(),
+            labels: labels.clone(),
+        })
+    });
+    cx.run_until_idle();
+    let max_offset = scroll.0.borrow().base_handle.max_offset().y;
+    assert!(max_offset > px(0.));
+    let initial_rendered_items = rendered_items.get();
+    let frames_before = window.update(|window, _| window.frame_duration_snapshot());
+    let mut updates: usize = 0;
+    cx.bench_renderer(view, |_, _, cx| {
+        updates += 1;
+        let phase = updates % 80;
+        let distance = if phase < 40 { phase } else { 80 - phase };
+        let offset = if max_offset > px(2_200.) {
+            -px(2_000. + distance as f32 * 5.)
+        } else {
+            -max_offset * (distance as f32 / 40.)
+        };
+        scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.), offset));
+        cx.notify();
+    });
+    let frames_after = window.update(|window, _| window.frame_duration_snapshot());
+    let retained = window.update(|window, _| window.retained_frame_snapshot());
+    assert!(updates > 0);
+    assert_eq!(rendered_frames.get(), updates + 1);
+    assert!(rendered_items.get() > initial_rendered_items);
+    assert_eq!(
+        frames_after.draw_duration_histogram.len() - frames_before.draw_duration_histogram.len(),
+        updates as u64
+    );
+    let retained_enabled = std::env::var("GPUI_RETAINED_TREE").is_ok_and(|value| value == "1");
+    assert_eq!(retained.enabled, retained_enabled);
+}
+
 gpui::bench_group! {
     name = benches;
     config = criterion::Criterion::default()
@@ -246,6 +469,6 @@ gpui::bench_group! {
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3))
         .without_plots();
-    targets = frames
+    targets = frames, scroll_frames, uniform_scroll_frames
 }
 gpui::bench_main!(benches);
