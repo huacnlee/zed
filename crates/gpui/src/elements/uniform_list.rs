@@ -70,6 +70,7 @@ pub struct UniformList {
 
 /// Frame state used by the [UniformList].
 pub struct UniformListFrameState {
+    measured_item_size: Size<Pixels>,
     items: SmallVec<[AnyElement; 32]>,
     decorations: SmallVec<[AnyElement; 2]>,
 }
@@ -322,6 +323,7 @@ impl Element for UniformList {
         (
             layout_id,
             UniformListFrameState {
+                measured_item_size: item_size,
                 items: SmallVec::new(),
                 decorations: SmallVec::new(),
             },
@@ -356,7 +358,7 @@ impl Element for UniformList {
             ListHorizontalSizingBehavior::Unconstrained
         );
 
-        let longest_item_size = self.measure_item(None, window, cx);
+        let longest_item_size = frame_state.measured_item_size;
         let content_width = if can_scroll_horizontally {
             padded_bounds.size.width.max(longest_item_size.width)
         } else {
@@ -720,6 +722,66 @@ impl InteractiveElement for UniformList {
 #[cfg(test)]
 mod test {
     use crate::TestAppContext;
+
+    #[gpui::test]
+    fn measures_item_once_per_scrolled_frame(cx: &mut TestAppContext) {
+        use crate::{
+            Context, FocusHandle, ScrollStrategy, UniformListScrollHandle, Window, div, prelude::*,
+            px, uniform_list,
+        };
+        use std::{cell::Cell, rc::Rc};
+
+        actions!(example, [Scroll]);
+
+        struct TestView {
+            scroll_handle: UniformListScrollHandle,
+            measured_items: Rc<Cell<usize>>,
+            focus_handle: FocusHandle,
+        }
+
+        impl TestView {
+            fn scroll(&mut self, _: &Scroll, window: &mut Window, _: &mut Context<Self>) {
+                self.measured_items.set(0);
+                self.scroll_handle.scroll_to_item(40, ScrollStrategy::Top);
+                window.refresh();
+            }
+        }
+
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let measured_items = self.measured_items.clone();
+                div()
+                    .track_focus(&self.focus_handle)
+                    .on_action(cx.listener(Self::scroll))
+                    .child(
+                        uniform_list("entries", 100, move |range, _, _| {
+                            range
+                                .map(|index| {
+                                    if index == 0 {
+                                        measured_items.set(measured_items.get() + 1);
+                                    }
+                                    div().h(px(20.)).child(format!("Item {index}"))
+                                })
+                                .collect()
+                        })
+                        .track_scroll(&self.scroll_handle)
+                        .h(px(200.)),
+                    )
+            }
+        }
+
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            window.focus(&focus_handle, cx);
+            TestView {
+                scroll_handle: UniformListScrollHandle::new(),
+                measured_items: Rc::new(Cell::new(0)),
+                focus_handle,
+            }
+        });
+        cx.dispatch_action(Scroll);
+        view.read_with(cx, |view, _| assert_eq!(view.measured_items.get(), 1));
+    }
 
     #[gpui::test]
     fn test_scroll_strategy_nearest(cx: &mut TestAppContext) {
