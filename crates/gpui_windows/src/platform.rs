@@ -410,20 +410,33 @@ impl WindowsPlatform {
     }
 }
 
-fn translate_accelerator(msg: &MSG) -> Option<()> {
-    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+fn translate_accelerator(message: &MSG, is_gpui_window: impl FnOnce() -> bool) -> Option<()> {
+    if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
+        return None;
+    }
+    if !is_gpui_window() {
         return None;
     }
 
     let result = unsafe {
         SendMessageW(
-            msg.hwnd,
+            message.hwnd,
             WM_GPUI_KEYDOWN,
-            Some(msg.wParam),
-            Some(msg.lParam),
+            Some(message.wParam),
+            Some(message.lParam),
         )
     };
     (result.0 == 0).then_some(())
+}
+
+fn contains_window_handle(
+    window_handles: &RwLock<SmallVec<[SafeHwnd; 4]>>,
+    window_handle: HWND,
+) -> bool {
+    window_handles
+        .read()
+        .iter()
+        .any(|handle| handle.as_raw() == window_handle)
 }
 
 fn encode_restart_arguments(arguments: &[OsString]) -> OsString {
@@ -511,12 +524,16 @@ impl Platform for WindowsPlatform {
             self.begin_vsync_thread();
         }
 
-        let mut msg = MSG::default();
+        let mut message = MSG::default();
         unsafe {
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                if translate_accelerator(&msg).is_none() {
-                    _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+            while GetMessageW(&mut message, None, 0, 0).as_bool() {
+                if translate_accelerator(&message, || {
+                    contains_window_handle(&self.raw_window_handles, message.hwnd)
+                })
+                .is_none()
+                {
+                    _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
                 }
             }
         }
@@ -964,19 +981,13 @@ impl Platform for WindowsPlatform {
             }
 
             if credentials.is_null() {
-                Ok(None)
-            } else {
-                let username: String = unsafe { (*credentials).UserName.to_string()? };
-                let credential_blob = unsafe {
-                    std::slice::from_raw_parts(
-                        (*credentials).CredentialBlob,
-                        (*credentials).CredentialBlobSize as usize,
-                    )
-                };
-                let password = credential_blob.to_vec();
-                unsafe { CredFree(credentials as *const _ as _) };
-                Ok(Some((username, password)))
+                return Ok(None);
             }
+
+            // SAFETY: `CredReadW` succeeded, so this points to a valid `CREDENTIALW` until `CredFree` below.
+            let result = unsafe { username_and_password(&*credentials) };
+            unsafe { CredFree(credentials as *const _ as _) };
+            result.map(Some)
         })
     }
 
@@ -1142,23 +1153,29 @@ impl WindowsPlatformInner {
                     // we spent our budget on gpui tasks, we likely have a lot of work queued so drain system events first to stay responsive
                     // then quit out of foreground work to allow us to process other gpui events first before returning back to foreground task work
                     // if we don't we might not for example process window quit events
-                    let mut msg = MSG::default();
-                    let process_message = |msg: &_| {
-                        if translate_accelerator(msg).is_none() {
-                            _ = unsafe { TranslateMessage(msg) };
-                            unsafe { DispatchMessageW(msg) };
+                    let mut message = MSG::default();
+                    let process_message = |message: &MSG| {
+                        if translate_accelerator(message, || {
+                            self.raw_window_handles.upgrade().is_some_and(|handles| {
+                                contains_window_handle(&handles, message.hwnd)
+                            })
+                        })
+                        .is_none()
+                        {
+                            _ = unsafe { TranslateMessage(message) };
+                            unsafe { DispatchMessageW(message) };
                         }
                     };
-                    let peek_msg = |msg: &mut _, msg_kind| unsafe {
-                        PeekMessageW(msg, None, 0, 0, PM_REMOVE | msg_kind).as_bool()
+                    let peek_message = |message: &mut _, message_kind| unsafe {
+                        PeekMessageW(message, None, 0, 0, PM_REMOVE | message_kind).as_bool()
                     };
                     // We need to process a paint message here as otherwise we will re-enter `run_foreground_task` before painting if we have work remaining.
                     // The reason for this is that windows prefers custom application message processing over system messages.
-                    if peek_msg(&mut msg, PM_QS_PAINT) {
-                        process_message(&msg);
+                    if peek_message(&mut message, PM_QS_PAINT) {
+                        process_message(&message);
                     }
-                    while peek_msg(&mut msg, PM_QS_INPUT) {
-                        process_message(&msg);
+                    while peek_message(&mut message, PM_QS_INPUT) {
+                        process_message(&message);
                     }
                     // Allow the main loop to process other gpui events before going back into `run_foreground_task`
                     unsafe {
@@ -1634,14 +1651,104 @@ unsafe extern "system" fn window_procedure(
     result
 }
 
+/// Copies the username and secret out of a credential returned by `CredReadW`.
+///
+/// Both `UserName` and `CredentialBlob` are optional in Credential Manager and
+/// come back as null pointers when absent, so they are treated as empty here.
+///
+/// # Safety
+///
+/// A non-null `UserName` must point to a NUL-terminated wide string and a
+/// non-null `CredentialBlob` must be readable for `CredentialBlobSize` bytes,
+/// as is the case for credentials returned by `CredReadW`.
+unsafe fn username_and_password(credential: &CREDENTIALW) -> Result<(String, Vec<u8>)> {
+    let username = if credential.UserName.is_null() {
+        String::new()
+    } else {
+        // SAFETY: guaranteed by the caller.
+        unsafe { credential.UserName.to_string()? }
+    };
+    let password = if credential.CredentialBlob.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            std::slice::from_raw_parts(
+                credential.CredentialBlob,
+                credential.CredentialBlobSize as usize,
+            )
+        }
+        .to_vec()
+    };
+    Ok((username, password))
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
 
     use crate::{read_from_clipboard, write_to_clipboard};
     use gpui::ClipboardItem;
+    use windows::Win32::Security::Credentials::{
+        CRED_PERSIST_SESSION, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
+        CredWriteW,
+    };
+    use windows::core::{PCWSTR, PWSTR};
 
-    use super::encode_restart_arguments;
+    use super::{encode_restart_arguments, username_and_password};
+
+    #[test]
+    fn test_read_credential_with_username() {
+        assert_eq!(
+            round_trip_credential(Some("alice"), b"secret"),
+            ("alice".to_string(), b"secret".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_read_credential_without_username() {
+        assert_eq!(
+            round_trip_credential(None, b"secret"),
+            (String::new(), b"secret".to_vec())
+        );
+    }
+
+    fn round_trip_credential(username: Option<&str>, secret: &[u8]) -> (String, Vec<u8>) {
+        let mut target_name: Vec<u16> = format!(
+            "zed-test-{}-{}",
+            std::process::id(),
+            username.unwrap_or_default()
+        )
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+        let mut username: Vec<u16> = username
+            .map(|username| username.encode_utf16().chain(Some(0)).collect())
+            .unwrap_or_default();
+        let mut secret = secret.to_vec();
+        let credential = CREDENTIALW {
+            Type: CRED_TYPE_GENERIC,
+            TargetName: PWSTR::from_raw(target_name.as_mut_ptr()),
+            CredentialBlobSize: secret.len() as u32,
+            CredentialBlob: secret.as_mut_ptr(),
+            Persist: CRED_PERSIST_SESSION,
+            UserName: if username.is_empty() {
+                PWSTR::null()
+            } else {
+                PWSTR::from_raw(username.as_mut_ptr())
+            },
+            ..CREDENTIALW::default()
+        };
+        let target_name = PCWSTR::from_raw(target_name.as_ptr());
+        unsafe { CredWriteW(&credential, 0) }.unwrap();
+
+        let mut credentials: *mut CREDENTIALW = std::ptr::null_mut();
+        unsafe { CredReadW(target_name, CRED_TYPE_GENERIC, None, &mut credentials) }.unwrap();
+        let result = unsafe { username_and_password(&*credentials) };
+        unsafe { CredFree(credentials as *const _ as _) };
+        unsafe { CredDeleteW(target_name, CRED_TYPE_GENERIC, None) }.unwrap();
+        result.unwrap()
+    }
 
     #[test]
     fn test_encode_restart_arguments() {
