@@ -28,7 +28,7 @@ mod example {
     use gpui::{
         Animation, AnimationExt as _, App, Bounds, Context, FocusHandle, FontWeight, KeyBinding,
         Pixels, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, canvas,
-        div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba, size,
+        div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, size,
     };
     use gpui_platform::application;
     use objc2::rc::Retained;
@@ -79,12 +79,10 @@ mod example {
         impl SearchHandler {
             #[unsafe(method(controlTextDidChange:))]
             fn control_text_did_change(&self, notification: &NSNotification) {
-                let text = unsafe {
-                    notification
-                        .object()
-                        .and_then(|object| object.downcast::<NSControl>().ok())
-                        .map(|control| control.stringValue().to_string())
-                };
+                let text = notification
+                    .object()
+                    .and_then(|object| object.downcast::<NSControl>().ok())
+                    .map(|control| control.stringValue().to_string());
                 if let Some(text) = text {
                     let _ = self.ivars().tx.send(text);
                 }
@@ -271,9 +269,8 @@ mod example {
 
         let content_size = size(px(280.), px(124.));
 
-        // SAFETY: main thread; the popover objects are kept alive by the
-        // dismissal task below.
-        let (popover, controller, container) = unsafe {
+        // The popover objects are kept alive by the dismissal task below.
+        let (popover, controller, container) = {
             let container = NSView::new(mtm);
             container.setFrameSize(NSSize::new(
                 f32::from(content_size.width) as f64,
@@ -334,11 +331,8 @@ mod example {
             .expect("failed to open hosted popover window");
 
         // Let the popover receive keyboard input immediately.
-        // SAFETY: main thread; the container was installed by `show...` above.
-        unsafe {
-            if let Some(popover_window) = container.window() {
-                popover_window.makeKeyWindow();
-            }
+        if let Some(popover_window) = container.window() {
+            popover_window.makeKeyWindow();
         }
 
         // When the popover is dismissed, close the hosted GPUI window.
@@ -349,9 +343,7 @@ mod example {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
                     .await;
-                // SAFETY: checked on the main thread; the popover is kept alive
-                // by this future.
-                if !unsafe { popover.isShown() } {
+                if !popover.isShown() {
                     break;
                 }
             }
@@ -826,7 +818,7 @@ mod example {
         // detects external_view == contentView and promotes the GPUI native
         // view to be the contentView via setContentView:, giving it the same
         // CA-transaction resize path as a regular GPUI window — no edge jitter.
-        let (content_ptr, content_bounds) = unsafe {
+        let (content_ptr, content_bounds) = {
             let cv = native_window
                 .contentView()
                 .expect("native window has a content view");
@@ -919,13 +911,9 @@ mod example {
 
             // Merge the two native windows into one tab group — the same
             // native tab bar Terminal, Safari, or Ghostty use.
-            // SAFETY: main thread; both windows are alive (forgotten below).
-            unsafe {
-                dashboard_window.makeKeyAndOrderFront(None);
-                dashboard_window
-                    .addTabbedWindow_ordered(&showcase_window, NSWindowOrderingMode::Above);
-                dashboard_window.makeKeyAndOrderFront(None);
-            }
+            dashboard_window.makeKeyAndOrderFront(None);
+            dashboard_window.addTabbedWindow_ordered(&showcase_window, NSWindowOrderingMode::Above);
+            dashboard_window.makeKeyAndOrderFront(None);
 
             // Tell both panes about the native windows, for ⌘1/⌘2.
             let tab_windows = (
