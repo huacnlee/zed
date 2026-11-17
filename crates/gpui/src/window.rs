@@ -1346,11 +1346,11 @@ pub(crate) enum DrawPhase {
 
 #[cfg_attr(not(feature = "profiler"), allow(dead_code))]
 #[derive(Default)]
-struct DrawPhaseTimings {
-    prepaint: Duration,
-    request_layout: Duration,
-    layout: Duration,
-    paint: Duration,
+pub(crate) struct DrawPhaseTimings {
+    pub(crate) prepaint: Duration,
+    pub(crate) request_layout: Duration,
+    pub(crate) layout: Duration,
+    pub(crate) paint: Duration,
 }
 
 pub(crate) const PENDING_INPUT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -3460,13 +3460,10 @@ impl Window {
 
         #[cfg(feature = "profiler")]
         {
-            let draw_duration = self.window_profiler.end_draw(
+            let draw_duration = self.window_profiler.end_draw_with_phases(
                 frame_dirty.dirty_at,
                 frame_dirty.invalidations,
-                phase_timings.prepaint,
-                phase_timings.request_layout,
-                phase_timings.layout,
-                phase_timings.paint,
+                phase_timings,
             );
             self.debug_frame_overlay.record_frame(draw_duration);
         }

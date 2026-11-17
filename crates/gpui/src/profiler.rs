@@ -1040,14 +1040,19 @@ impl WindowProfiler {
     }
 
     /// Records the end of a window draw and returns the draw duration.
-    pub fn end_draw(
+    pub fn end_draw(&mut self, dirty_at: Option<Instant>, invalidations: u64) -> Duration {
+        self.end_draw_with_phases(
+            dirty_at,
+            invalidations,
+            crate::window::DrawPhaseTimings::default(),
+        )
+    }
+
+    pub(crate) fn end_draw_with_phases(
         &mut self,
         dirty_at: Option<Instant>,
         invalidations: u64,
-        prepaint_duration: Duration,
-        request_layout_duration: Duration,
-        layout_duration: Duration,
-        paint_duration: Duration,
+        phase_timings: crate::window::DrawPhaseTimings,
     ) -> Duration {
         let Some(WindowActivity::Draw {
             started_at: draw_start,
@@ -1065,10 +1070,10 @@ impl WindowProfiler {
             invalidations,
             draw_start,
             draw_end,
-            prepaint_duration,
-            request_layout_duration,
-            layout_duration,
-            paint_duration,
+            prepaint_duration: phase_timings.prepaint,
+            request_layout_duration: phase_timings.request_layout,
+            layout_duration: phase_timings.layout,
+            paint_duration: phase_timings.paint,
         };
         let draw_duration = frame_timing.draw_duration();
         if !journal::power_interrupted_since(draw_start) {
