@@ -18,8 +18,8 @@
 //! - "Details ▾" opens a system `NSPopover` (arrow, vibrancy, transient
 //!   dismissal) hosting another GPUI window — with a working ⏎ key binding.
 //!
-//! Run with: `cargo run -p gpui --example hosted_window` (macOS today;
-//! Windows/X11 hosts work the same way through `host_window_handle`).
+//! Run with: `cargo run -p gpui --example hosted_window` (macOS only:
+//! `host_window_handle` is currently implemented only by the macOS platform).
 
 #![cfg_attr(target_family = "wasm", no_main)]
 
@@ -33,7 +33,9 @@ mod example {
     use gpui_platform::application;
     use objc2::rc::Retained;
     use objc2::runtime::NSObject;
-    use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2::{
+        AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    };
     use objc2_app_kit::{
         NSBackingStoreType, NSControl, NSPopover, NSPopoverBehavior, NSSearchField, NSView,
         NSViewController, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
@@ -46,7 +48,10 @@ mod example {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    actions!(hosted_window, [SelectTab1, SelectTab2, DismissInfo, ToggleFeature]);
+    actions!(
+        hosted_window,
+        [SelectTab1, SelectTab2, DismissInfo, ToggleFeature]
+    );
 
     const APP_CONTEXT: &str = "HostedDemo";
     const POPOVER_CONTEXT: &str = "InfoPopover";
@@ -149,12 +154,9 @@ mod example {
                         ),
                 )
                 // description
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(0x52525b))
-                        .child("Arrow, vibrancy & transient dismissal are AppKit. Interaction below is GPUI."),
-                )
+                .child(div().text_size(px(11.)).text_color(rgb(0x52525b)).child(
+                    "Arrow, vibrancy & transient dismissal are AppKit. Interaction below is GPUI.",
+                ))
                 // interactive row
                 .child(
                     div()
@@ -208,7 +210,11 @@ mod example {
                                     this.enter_pressed = !this.enter_pressed;
                                     cx.notify();
                                 }))
-                                .child(if self.enter_pressed { "⌘K ✓" } else { "⌘K —" }),
+                                .child(if self.enter_pressed {
+                                    "⌘K ✓"
+                                } else {
+                                    "⌘K —"
+                                }),
                         )
                         .child(
                             div()
@@ -227,14 +233,16 @@ mod example {
                         .gap_1()
                         .text_size(px(11.))
                         .text_color(rgb(0x71717a))
-                        .child(
-                            div()
-                                .w(px(6.))
-                                .h(px(6.))
-                                .rounded_full()
-                                .bg(if toggle_on { rgb(CHART_2) } else { rgb(0xd4d4d8) }),
-                        )
-                        .child(if toggle_on { "feature enabled" } else { "feature disabled" })
+                        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if toggle_on {
+                            rgb(CHART_2)
+                        } else {
+                            rgb(0xd4d4d8)
+                        }))
+                        .child(if toggle_on {
+                            "feature enabled"
+                        } else {
+                            "feature disabled"
+                        })
                         .child(div().flex_1())
                         .child(if self.enter_pressed {
                             "⏎ received ✓"
@@ -460,7 +468,6 @@ mod example {
                 .flex()
                 .flex_col()
                 .justify_between()
-                
                 .opacity(if dimmed { 0.35 } else { 1. })
                 .child(
                     div()
@@ -493,7 +500,6 @@ mod example {
                 .border_1()
                 .border_color(rgb(0xe4e4e7))
                 .bg(gpui::white())
-                
                 .p_4()
                 .flex()
                 .items_end()
@@ -621,7 +627,11 @@ mod example {
                     .child("GPUI")
             }
 
-            fn card(index: usize, label: &'static str, content: impl IntoElement) -> impl IntoElement {
+            fn card(
+                index: usize,
+                label: &'static str,
+                content: impl IntoElement,
+            ) -> impl IntoElement {
                 div()
                     .id(index)
                     .flex_1()
@@ -662,8 +672,18 @@ mod example {
             .into_any_element();
 
             let text_items: [(&str, &str, FontWeight, Pixels); 5] = [
-                ("Semibold", "The quick brown fox", FontWeight::SEMIBOLD, px(14.)),
-                ("Medium", "jumps over the lazy dog", FontWeight::MEDIUM, px(13.)),
+                (
+                    "Semibold",
+                    "The quick brown fox",
+                    FontWeight::SEMIBOLD,
+                    px(14.),
+                ),
+                (
+                    "Medium",
+                    "jumps over the lazy dog",
+                    FontWeight::MEDIUM,
+                    px(13.),
+                ),
                 ("Normal", "0123456789 — !@#$%", FontWeight::NORMAL, px(12.)),
                 ("Light", "Aa Bb Cc Dd Ee Ff Gg", FontWeight::LIGHT, px(12.)),
                 ("Bold", "GPUI renders text", FontWeight::BOLD, px(15.)),
@@ -821,7 +841,10 @@ mod example {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
                         origin: point(px(0.), px(0.)),
-                        size: size(px(content_bounds.width as f32), px(content_bounds.height as f32)),
+                        size: size(
+                            px(content_bounds.width as f32),
+                            px(content_bounds.height as f32),
+                        ),
                     })),
                     host_window_handle: Some(RawWindowHandle::AppKit(AppKitWindowHandle::new(
                         content_ptr,
@@ -949,8 +972,8 @@ fn main() {
     example::run();
     #[cfg(not(target_os = "macos"))]
     println!(
-        "This example currently builds its native host with AppKit and is macOS-only; \
-         Windows/X11 hosts work the same way through WindowOptions::host_window_handle."
+        "This example is macOS-only: it builds its native host with AppKit, and \
+         WindowOptions::host_window_handle is currently implemented only on macOS."
     );
 }
 
