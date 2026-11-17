@@ -175,8 +175,17 @@ impl ViewInvalidator {
         }
         window.update_count += 1;
         window.dirty_views.insert(self.entity);
-        WindowInvalidator::record_frame_dirty(&mut window);
+        #[cfg(feature = "profiler")]
+        let dirty_at = WindowInvalidator::record_frame_dirty(&mut window);
+        #[cfg(feature = "profiler")]
+        let became_dirty = !window.dirty;
         window.dirty = true;
+        #[cfg(feature = "profiler")]
+        if became_dirty {
+            let window_id = window.window_id;
+            drop(window);
+            profiler::journal::record_frame_pending(window_id, dirty_at);
+        }
     }
 }
 
