@@ -688,9 +688,14 @@ impl Platform for MacPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
-        // Native popups are not implemented on macOS yet. Rejecting lets callers fall back to
-        // gpui's in-window popovers.
-        if let WindowKind::AnchoredPopup(_) = options.kind {
+        if let Some(host) = options.host_window_handle {
+            anyhow::ensure!(
+                matches!(host, raw_window_handle::RawWindowHandle::AppKit(_)),
+                "host_window_handle on macOS must be an AppKit handle"
+            );
+        } else if let WindowKind::AnchoredPopup(_) = options.kind {
+            // Native popups are not implemented on macOS yet. Rejecting lets callers fall back to
+            // gpui's in-window popovers. Hosted windows ignore `kind`, so they are not rejected.
             return Err(PopupNotSupportedError.into());
         }
 

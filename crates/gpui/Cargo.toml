@@ -152,6 +152,22 @@ http_client = { workspace = true, features = ["test-support"] }
 proptest = { workspace = true }
 reqwest_client = { workspace = true, features = ["test-support"] }
 
+# For the hosted_window example, which builds native AppKit hosts (NSPopover,
+# NSWindow) for GPUI windows.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = [
+    "NSControl",
+    "NSPopover",
+    "NSResponder",
+    "NSSearchField",
+    "NSTextField",
+    "NSView",
+    "NSViewController",
+    "NSWindow",
+] }
+objc2-foundation = { workspace = true }
+
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 wasm-bindgen = { workspace = true }
 web-sys = { version = "0.3", features = ["console"] }
@@ -175,6 +191,10 @@ ignored-paths = ["src/_ownership_and_data_flow.rs"]
 [[example]]
 name = "hello_world"
 path = "examples/hello_world.rs"
+
+[[example]]
+name = "hosted_window"
+path = "examples/hosted_window.rs"
 
 [[example]]
 name = "move_entity_between_windows"
