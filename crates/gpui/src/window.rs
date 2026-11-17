@@ -3362,7 +3362,6 @@ impl Window {
                     scale_factor,
                 );
             }
-        }
             phase_timings
         } else {
             DrawPhaseTimings::default()
@@ -3461,9 +3460,7 @@ impl Window {
 
         #[cfg(feature = "profiler")]
         {
-            let draw_duration = self
-                .window_profiler
-                .end_draw(
+            let draw_duration = self.window_profiler.end_draw(
                 frame_dirty.dirty_at,
                 frame_dirty.invalidations,
                 phase_timings.prepaint,

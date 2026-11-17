@@ -348,14 +348,9 @@ impl<V: View> Element for ViewElement<V> {
         if let Some(entity_id) = self.entity_id {
             // Stateful path: create a reactive boundary.
             let view = &mut self.view;
-            request_layout_view(
-                entity_id,
-                id,
-                &self.cache,
-                window,
-                cx,
-                &mut |window, cx| view.take().unwrap().render(window, cx).into_any_element(),
-            )
+            request_layout_view(entity_id, id, &self.cache, window, cx, &mut |window, cx| {
+                view.take().unwrap().render(window, cx).into_any_element()
+            })
         } else {
             // Stateless path: isolate subtree via type name (no entity identity).
             request_layout_component(type_name::<V>(), window, cx, &mut |window, cx| {
@@ -476,8 +471,8 @@ fn request_layout_view(
                             return ((layout_id, Some(element)), state);
                         }
 
-                        let ((layout_id, element), accessed_entities) =
-                            cx.detect_accessed_entities(|cx| {
+                        let ((layout_id, element), accessed_entities) = cx
+                            .detect_accessed_entities(|cx| {
                                 let mut element = render(window, cx);
                                 let layout_id = element.request_layout(window, cx);
                                 (layout_id, element)
