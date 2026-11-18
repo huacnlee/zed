@@ -1,9 +1,13 @@
 use std::{
+    cell::{Cell, RefCell},
+    ops::Range,
+    rc::Rc,
     slice,
     sync::{Arc, OnceLock},
 };
 
 use anyhow::{Context, Result};
+use collections::{FxHashMap, FxHashSet};
 use gpui_util::ResultExt;
 use windows::{
     Win32::{
@@ -25,8 +29,6 @@ use gpui::*;
 
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
-// This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
-const PATH_MULTISAMPLE_COUNT: u32 = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 pub(crate) struct FontInfo {
@@ -41,9 +43,13 @@ pub(crate) struct DirectXRenderer {
     atlas: Arc<DirectXAtlas>,
     devices: Option<DirectXRendererDevices>,
     resources: Option<DirectXResources>,
+    composition_resources: FxHashMap<CompositionSurfaceId, OverlayResources>,
+    base_composition_surface: Option<CompositionSurfaceId>,
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
+    composition_surfaces: Vec<PlatformCompositionSurface>,
+    native_surfaces: Vec<std::rc::Weak<RefCell<DirectCompositionPortalState>>>,
     font_info: &'static FontInfo,
 
     width: u32,
@@ -63,6 +69,7 @@ pub(crate) struct DirectXRendererDevices {
     pub(crate) dxgi_factory: IDXGIFactory6,
     pub(crate) device: ID3D11Device,
     pub(crate) device_context: ID3D11DeviceContext,
+    device_context1: Option<ID3D11DeviceContext1>,
     dxgi_device: Option<IDXGIDevice>,
     annotation: Option<ID3DUserDefinedAnnotation>,
 }
@@ -72,22 +79,26 @@ struct DirectXResources {
     swap_chain: IDXGISwapChain1,
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
-
-    // Path intermediate textures (with MSAA)
-    path_intermediate_texture: ID3D11Texture2D,
-    path_intermediate_srv: Option<ID3D11ShaderResourceView>,
-    path_intermediate_msaa_texture: ID3D11Texture2D,
-    path_intermediate_msaa_view: Option<ID3D11RenderTargetView>,
+    depth_stencil_texture: ID3D11Texture2D,
+    depth_stencil_view: Option<ID3D11DepthStencilView>,
 
     // Cached viewport
     viewport: D3D11_VIEWPORT,
 }
 
+struct OverlayResources {
+    swap_chain: IDXGISwapChain1,
+    render_target: Option<ID3D11Texture2D>,
+    render_target_view: Option<ID3D11RenderTargetView>,
+}
+
 struct DirectXRenderPipelines {
     shadow_pipeline: PipelineState<Shadow>,
     quad_pipeline: PipelineState<Quad>,
-    path_rasterization_pipeline: PipelineState<PathRasterizationSprite>,
-    path_sprite_pipeline: PipelineState<PathSprite>,
+    opaque_quad_pipeline: OpaqueQuadPipeline,
+    path_tile_pipeline: PipelineState<PathTile>,
+    path_curves: StructuredBuffer<PathCurve>,
+    path_paints: StructuredBuffer<PathPaint>,
     underline_pipeline: PipelineState<Underline>,
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
@@ -117,8 +128,29 @@ impl Drop for Annotation<'_> {
 
 struct DirectComposition {
     comp_device: IDCompositionDevice,
+    // Keep these COM objects alive for the lifetime of the visual tree. They
+    // are not otherwise read after the tree is attached to the target.
+    #[allow(dead_code)]
     comp_target: IDCompositionTarget,
-    comp_visual: IDCompositionVisual,
+    #[allow(dead_code)]
+    root_visual: IDCompositionVisual,
+    base_visual: IDCompositionVisual,
+    gpui_visuals: RefCell<FxHashMap<CompositionSurfaceId, IDCompositionVisual>>,
+}
+
+struct DirectCompositionPortal {
+    state: Rc<RefCell<DirectCompositionPortalState>>,
+}
+
+struct DirectCompositionPortalState {
+    comp_device: IDCompositionDevice,
+    visual: IDCompositionVisual,
+    clip: IDCompositionRectangleClip,
+    bounds: Cell<Bounds<DevicePixels>>,
+    parent_origin: Cell<Point<DevicePixels>>,
+    visible: Cell<bool>,
+    compositor_recreated_callback:
+        RefCell<Option<Rc<dyn Fn(Box<dyn std::any::Any>) -> Result<()>>>>,
 }
 
 impl DirectXRendererDevices {
@@ -138,12 +170,14 @@ impl DirectXRendererDevices {
             Some(device.cast().context("Creating DXGI device")?)
         };
         let annotation = device_context.cast().ok();
+        let device_context1 = device_context.cast().ok();
 
         Ok(Self {
             adapter: adapter.clone(),
             dxgi_factory: dxgi_factory.clone(),
             device: device.clone(),
             device_context: device_context.clone(),
+            device_context1,
             dxgi_device,
             annotation,
         })
@@ -187,9 +221,13 @@ impl DirectXRenderer {
             atlas,
             devices: Some(devices),
             resources: Some(resources),
+            composition_resources: FxHashMap::default(),
+            base_composition_surface: None,
             globals,
             pipelines,
             direct_composition,
+            composition_surfaces: Vec::new(),
+            native_surfaces: Vec::new(),
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -201,7 +239,12 @@ impl DirectXRenderer {
         self.atlas.clone()
     }
 
-    fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
+    fn pre_draw(
+        &self,
+        render_target_view: &Option<ID3D11RenderTargetView>,
+        clear_color: &[f32; 4],
+        depth_scale: f32,
+    ) -> Result<()> {
         let resources = self.resources.as_ref().expect("resources missing");
         let device_context = &self
             .devices
@@ -217,19 +260,30 @@ impl DirectXRenderer {
                 grayscale_enhanced_contrast: self.font_info.grayscale_enhanced_contrast,
                 subpixel_enhanced_contrast: self.font_info.subpixel_enhanced_contrast,
                 is_bgr: self.font_info.is_bgr as u32,
-                _pad: [0; 3],
+                depth_scale,
+                _pad: [0; 2],
             }],
         )?;
         unsafe {
             device_context.ClearRenderTargetView(
-                resources
-                    .render_target_view
+                render_target_view
                     .as_ref()
                     .context("missing render target view")?,
                 clear_color,
             );
-            device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
+            device_context.ClearDepthStencilView(
+                resources
+                    .depth_stencil_view
+                    .as_ref()
+                    .context("missing depth stencil view")?,
+                D3D11_CLEAR_DEPTH.0,
+                0.0,
+                0,
+            );
+            device_context.OMSetRenderTargets(
+                Some(slice::from_ref(render_target_view)),
+                resources.depth_stencil_view.as_ref(),
+            );
             device_context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
             device_context
                 .VSSetConstantBuffers(0, Some(slice::from_ref(&self.globals.global_params_buffer)));
@@ -239,6 +293,13 @@ impl DirectXRenderer {
                 .PSSetConstantBuffers(0, Some(slice::from_ref(&self.globals.global_params_buffer)));
         }
         Ok(())
+    }
+
+    fn discard_depth_buffer(&self) -> Option<()> {
+        let context1 = self.devices.as_ref()?.device_context1.as_ref()?;
+        let depth_stencil_view = self.resources.as_ref()?.depth_stencil_view.as_ref()?;
+        unsafe { context1.DiscardView(depth_stencil_view) };
+        Some(())
     }
 
     #[inline]
@@ -262,6 +323,11 @@ impl DirectXRenderer {
 
     fn handle_device_lost_impl(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         let disable_direct_composition = self.direct_composition.is_none();
+        let composition_surface_ids = self
+            .composition_resources
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
 
         unsafe {
             #[cfg(debug_assertions)]
@@ -272,6 +338,7 @@ impl DirectXRenderer {
             }
 
             self.resources.take();
+            self.composition_resources.clear();
             if let Some(devices) = &self.devices {
                 devices.device_context.OMSetRenderTargets(None, None);
                 devices.device_context.ClearState();
@@ -309,17 +376,61 @@ impl DirectXRenderer {
             composition.set_swap_chain(&resources.swap_chain)?;
             Some(composition)
         };
+        let mut composition_resources = FxHashMap::default();
+        for surface in composition_surface_ids {
+            let resources = OverlayResources::new(&devices, self.width, self.height)?;
+            direct_composition
+                .as_ref()
+                .context("DirectComposition missing for GPUI surface")?
+                .set_gpui_swap_chain(surface, &resources.swap_chain)?;
+            composition_resources.insert(surface, resources);
+        }
+        let mut live_native_surfaces = Vec::with_capacity(self.native_surfaces.len());
+        for surface in &self.native_surfaces {
+            let Some(live_surface) = surface.upgrade() else {
+                continue;
+            };
+            if let Some(composition) = direct_composition.as_ref() {
+                composition
+                    .rebind_portal(&mut live_surface.borrow_mut())
+                    .context("Recreating DirectComposition native surface")?;
+            }
+            live_native_surfaces.push(Rc::downgrade(&live_surface));
+        }
+        self.native_surfaces = live_native_surfaces;
+        if let (Some(composition), Some(base_surface)) =
+            (direct_composition.as_ref(), self.base_composition_surface)
+            && !self.composition_surfaces.is_empty()
+        {
+            let platform_context = composition.comp_device.cast::<windows::core::IUnknown>()?;
+            for surface in &self.composition_surfaces {
+                match &surface.content {
+                    PlatformCompositionSurfaceContent::Native(platform_surface)
+                    | PlatformCompositionSurfaceContent::ExternalGpu(platform_surface) => {
+                        platform_surface
+                            .compositor_recreated(&platform_context)
+                            .context("Rebinding platform composition surface")?;
+                    }
+                    PlatformCompositionSurfaceContent::Gpui => {}
+                }
+            }
+            composition
+                .set_surface_order(&self.composition_surfaces, base_surface)
+                .context("Restoring DirectComposition surface order")?;
+        }
 
         self.atlas
             .handle_device_lost(&devices.device, &devices.device_context);
 
         unsafe {
-            devices
-                .device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
+            devices.device_context.OMSetRenderTargets(
+                Some(slice::from_ref(&resources.render_target_view)),
+                resources.depth_stencil_view.as_ref(),
+            );
         }
         self.devices = Some(devices);
         self.resources = Some(resources);
+        self.composition_resources = composition_resources;
         self.globals = globals;
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;
@@ -351,28 +462,211 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
-        self.pre_draw(&match background_appearance {
-            WindowBackgroundAppearance::Opaque => [1.0f32; 4],
-            _ => [0.0f32; 4],
-        })?;
-        self.upload_scene_buffers(scene)?;
+        let render_target_view = self
+            .resources
+            .as_ref()
+            .context("resources missing")?
+            .render_target_view
+            .clone();
+        let depth_scale = quad_depth_scale(scene.quads.len());
+        self.pre_draw(
+            &render_target_view,
+            &match background_appearance {
+                WindowBackgroundAppearance::Opaque => [1.0f32; 4],
+                _ => [0.0f32; 4],
+            },
+            depth_scale,
+        )?;
+        self.draw_scene(scene, depth_scale)
+    }
 
+    pub(crate) fn draw_composed(
+        &mut self,
+        scene: gpui::ComposedScene<'_>,
+        background_appearance: WindowBackgroundAppearance,
+    ) -> Result<()> {
+        if self.base_composition_surface.is_none() {
+            return self.draw(scene.scene(), background_appearance);
+        }
+        if self.skip_draws {
+            return Ok(());
+        }
+
+        for layer in scene.layers() {
+            let mut surface_scene = Scene::default();
+            for range in &layer.ranges {
+                surface_scene.replay_balanced(range.clone(), scene.scene())?;
+            }
+            surface_scene.finish();
+            let (view, clear_color) = if self.base_composition_surface == Some(layer.surface) {
+                (
+                    self.resources
+                        .as_ref()
+                        .context("resources missing")?
+                        .render_target_view
+                        .clone(),
+                    match background_appearance {
+                        WindowBackgroundAppearance::Opaque => [1.0; 4],
+                        _ => [0.0; 4],
+                    },
+                )
+            } else {
+                (
+                    self.composition_resources
+                        .get(&layer.surface)
+                        .context("GPUI composition resources missing")?
+                        .render_target_view
+                        .clone(),
+                    [0.0; 4],
+                )
+            };
+            let depth_scale = quad_depth_scale(surface_scene.quads.len());
+            self.pre_draw(&view, &clear_color, depth_scale)?;
+            self.draw_scene(&surface_scene, depth_scale)?;
+        }
+
+        unsafe {
+            self.resources
+                .as_ref()
+                .context("resources missing")?
+                .swap_chain
+                .Present(0, DXGI_PRESENT(0))
+                .ok()
+                .context("presenting base swap chain")?;
+            for resources in self.composition_resources.values() {
+                resources
+                    .swap_chain
+                    .Present(0, DXGI_PRESENT(0))
+                    .ok()
+                    .context("presenting GPUI composition swap chain")?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn enable_window_composition(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.direct_composition.is_some(),
+            "DirectComposition is disabled"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn create_native_surface(&mut self) -> Result<Rc<dyn PlatformSurfaceAttachment>> {
+        self.enable_window_composition()?;
+        let state = Rc::new(RefCell::new(
+            self.direct_composition
+                .as_ref()
+                .context("DirectComposition is disabled")?
+                .create_portal_state()?,
+        ));
+        self.native_surfaces.push(Rc::downgrade(&state));
+        Ok(Rc::new(DirectCompositionPortal { state }))
+    }
+
+    pub(crate) fn set_composition_order(
+        &mut self,
+        surfaces: &[PlatformCompositionSurface],
+    ) -> Result<()> {
+        let base = surfaces
+            .iter()
+            .find_map(|surface| match surface.content {
+                PlatformCompositionSurfaceContent::Gpui => Some(surface.id),
+                PlatformCompositionSurfaceContent::Native(_)
+                | PlatformCompositionSurfaceContent::ExternalGpu(_) => None,
+            })
+            .context("composition has no GPUI base surface")?;
+        let previous_base = self.base_composition_surface;
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let composition = self
+            .direct_composition
+            .as_ref()
+            .context("DirectComposition is disabled")?;
+        for surface in surfaces {
+            if !matches!(surface.content, PlatformCompositionSurfaceContent::Gpui) {
+                continue;
+            }
+            if surface.id == base || self.composition_resources.contains_key(&surface.id) {
+                continue;
+            }
+            let resources = OverlayResources::new(devices, self.width, self.height)?;
+            composition.set_gpui_swap_chain(surface.id, &resources.swap_chain)?;
+            self.composition_resources.insert(surface.id, resources);
+        }
+        let active_gpui_surfaces = surfaces
+            .iter()
+            .filter_map(|surface| match surface.content {
+                PlatformCompositionSurfaceContent::Gpui if surface.id != base => Some(surface.id),
+                _ => None,
+            })
+            .collect::<FxHashSet<_>>();
+        if let Err(error) = composition.set_surface_order(surfaces, base) {
+            if let Some(previous_base) = previous_base
+                && !self.composition_surfaces.is_empty()
+                && let Err(rollback_error) =
+                    composition.set_surface_order(&self.composition_surfaces, previous_base)
+            {
+                return Err(error).context(format!(
+                    "restoring the previous DirectComposition tree also failed: {rollback_error:#}"
+                ));
+            }
+            return Err(error);
+        }
+        self.composition_resources
+            .retain(|id, _| active_gpui_surfaces.contains(id));
+        composition.retain_gpui_surfaces(&active_gpui_surfaces);
+        self.base_composition_surface = Some(base);
+        self.composition_surfaces = surfaces.to_vec();
+        Ok(())
+    }
+
+    fn draw_scene(&mut self, scene: &Scene, depth_scale: f32) -> Result<()> {
+        self.upload_scene_buffers(scene)?;
         let annotation = self
             .devices
             .as_ref()
             .and_then(|devices| devices.annotation.clone())
             .filter(|annotation| unsafe { annotation.GetStatus().as_bool() });
+
+        if !scene.quads.is_empty() {
+            let _annotation = annotation.as_ref().map(|annotation| {
+                Annotation::new(
+                    annotation,
+                    HSTRING::from(format!("opaque quads ({})", scene.quads.len())),
+                )
+            });
+            self.draw_opaque_quads(scene.quads.len())?;
+        }
+
+        let mut quad_cursor: u32 = 0;
+        let mut path_tile_cursor = 0;
         for batch in scene.batches() {
             let _annotation = annotation
                 .as_ref()
                 .map(|annotation| Annotation::new(annotation, HSTRING::from(batch.label())));
+
+            // Quad shaders assign each quad its own depth.
+            // In every other batch type, the depth is fixed to the position of the quad cursor.
+            if matches!(&batch, PrimitiveBatch::Quads(_)) {
+                self.set_viewport_depth_range(0.0, 1.0)?;
+            } else {
+                let depth = quad_depth(quad_cursor, depth_scale);
+                self.set_viewport_depth_range(depth, depth)?;
+            }
+
             match batch {
                 PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
-                PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
+                PrimitiveBatch::Quads(range) => {
+                    quad_cursor += range.len() as u32;
+                    self.draw_quads(range.start, range.len())
+                }
                 PrimitiveBatch::Paths(range) => {
-                    let paths = &scene.paths[range];
-                    self.draw_paths_to_intermediate(paths)?;
-                    self.draw_paths_from_intermediate(paths)
+                    let tiles_start = path_tile_cursor;
+                    path_tile_cursor += scene.paths[range]
+                        .iter()
+                        .map(PaintedPath::tile_count)
+                        .sum::<usize>();
+                    self.draw_paths(tiles_start..path_tile_cursor)
                 }
                 PrimitiveBatch::Underlines(range) => self.draw_underlines(range.start, range.len()),
                 PrimitiveBatch::MonochromeSprites { texture_id, range } => {
@@ -401,6 +695,7 @@ impl DirectXRenderer {
                 )
             })?;
         }
+        self.discard_depth_buffer();
         Ok(())
     }
 
@@ -409,7 +704,7 @@ impl DirectXRenderer {
     /// goes through MetalRenderer; this is the Windows analogue). Draws into
     /// the existing render target, copies it into a `D3D11_USAGE_STAGING`
     /// texture, maps it, and converts BGRA to RGBA.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn render_to_image(
         &mut self,
         scene: &Scene,
@@ -482,6 +777,36 @@ impl DirectXRenderer {
             .context("Failed to build RgbaImage from staging readback")
     }
 
+    fn set_viewport_depth_range(&self, minimum_depth: f32, maximum_depth: f32) -> Result<()> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        // Equal endpoints collapse every shader depth to the same value.
+        let viewport = D3D11_VIEWPORT {
+            MinDepth: minimum_depth,
+            MaxDepth: maximum_depth,
+            ..resources.viewport
+        };
+        unsafe {
+            devices
+                .device_context
+                .RSSetViewports(Some(slice::from_ref(&viewport)))
+        };
+        Ok(())
+    }
+
+    fn draw_opaque_quads(&self, quad_count: usize) -> Result<()> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        self.pipelines.opaque_quad_pipeline.draw(
+            &devices.device_context,
+            &self.pipelines.quad_pipeline,
+            self.globals
+                .batch_params_buffer
+                .as_ref()
+                .context("batch params buffer missing")?,
+            quad_count as u32,
+        )
+    }
+
     pub(crate) fn resize(&mut self, new_size: Size<DevicePixels>) -> Result<()> {
         let width = new_size.width.0.max(1) as u32;
         let height = new_size.height.0.max(1) as u32;
@@ -517,10 +842,15 @@ impl DirectXRenderer {
 
         resources.recreate_resources(devices, width, height)?;
 
+        for resources in self.composition_resources.values_mut() {
+            resources.resize(devices, width, height)?;
+        }
+
         unsafe {
-            devices
-                .device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
+            devices.device_context.OMSetRenderTargets(
+                Some(slice::from_ref(&resources.render_target_view)),
+                resources.depth_stencil_view.as_ref(),
+            );
         }
 
         Ok(())
@@ -543,6 +873,39 @@ impl DirectXRenderer {
                 &devices.device_context,
                 &scene.quads,
             )?;
+        }
+
+        if !scene.paths.is_empty() {
+            let mut paints = Vec::with_capacity(scene.paths.len());
+            let mut curves = Vec::new();
+            let mut tiles = Vec::new();
+            for path in &scene.paths {
+                path.append_to(&mut paints, &mut curves, &mut tiles);
+            }
+
+            self.pipelines.path_tile_pipeline.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                &tiles,
+            )?;
+            self.pipelines
+                .path_curves
+                .write(&devices.device, &devices.device_context, &curves)?;
+            self.pipelines
+                .path_paints
+                .write(&devices.device, &devices.device_context, &paints)?;
+            let buffers = [
+                self.pipelines.path_curves.view.clone(),
+                self.pipelines.path_paints.view.clone(),
+            ];
+            unsafe {
+                devices
+                    .device_context
+                    .VSSetShaderResources(2, Some(&buffers));
+                devices
+                    .device_context
+                    .PSSetShaderResources(2, Some(&buffers));
+            }
         }
 
         if !scene.underlines.is_empty() {
@@ -612,110 +975,19 @@ impl DirectXRenderer {
         )
     }
 
-    fn draw_paths_to_intermediate(&mut self, paths: &[Path<ScaledPixels>]) -> Result<()> {
-        if paths.is_empty() {
+    fn draw_paths(&mut self, tile_range: Range<usize>) -> Result<()> {
+        if tile_range.is_empty() {
             return Ok(());
         }
-
         let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
-        // Clear intermediate MSAA texture
-        unsafe {
-            devices.device_context.ClearRenderTargetView(
-                resources.path_intermediate_msaa_view.as_ref().unwrap(),
-                &[0.0; 4],
-            );
-            // Set intermediate MSAA texture as render target
-            devices.device_context.OMSetRenderTargets(
-                Some(slice::from_ref(&resources.path_intermediate_msaa_view)),
-                None,
-            );
-        }
-
-        // Collect all vertices and sprites for a single draw call
-        let mut vertices = Vec::new();
-
-        for path in paths {
-            vertices.extend(path.vertices.iter().map(|v| PathRasterizationSprite {
-                xy_position: v.xy_position,
-                st_position: v.st_position,
-                color: path.color,
-                bounds: path.clipped_bounds(),
-            }));
-        }
-
-        self.pipelines.path_rasterization_pipeline.update_buffer(
-            &devices.device,
+        self.pipelines.path_tile_pipeline.draw_range(
             &devices.device_context,
-            &vertices,
-        )?;
-
-        self.pipelines.path_rasterization_pipeline.draw(
-            &devices.device_context,
-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-            vertices.len() as u32,
-            1,
-        )?;
-
-        // Resolve MSAA to non-MSAA intermediate texture
-        unsafe {
-            devices.device_context.ResolveSubresource(
-                &resources.path_intermediate_texture,
-                0,
-                &resources.path_intermediate_msaa_texture,
-                0,
-                RENDER_TARGET_FORMAT,
-            );
-            // Restore main render target
-            devices
-                .device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
-        }
-
-        Ok(())
-    }
-
-    fn draw_paths_from_intermediate(&mut self, paths: &[Path<ScaledPixels>]) -> Result<()> {
-        let Some(first_path) = paths.first() else {
-            return Ok(());
-        };
-
-        // When copying paths from the intermediate texture to the drawable,
-        // each pixel must only be copied once, in case of transparent paths.
-        //
-        // If all paths have the same draw order, then their bounds are all
-        // disjoint, so we can copy each path's bounds individually. If this
-        // batch combines different draw orders, we perform a single copy
-        // for a minimal spanning rect.
-        let sprites = if paths.last().unwrap().order == first_path.order {
-            paths
-                .iter()
-                .map(|path| PathSprite {
-                    bounds: path.clipped_bounds(),
-                })
-                .collect::<Vec<_>>()
-        } else {
-            let mut bounds = first_path.clipped_bounds();
-            for path in paths.iter().skip(1) {
-                bounds = bounds.union(&path.clipped_bounds());
-            }
-            vec![PathSprite { bounds }]
-        };
-
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
-        self.pipelines.path_sprite_pipeline.update_buffer(
-            &devices.device,
-            &devices.device_context,
-            &sprites,
-        )?;
-
-        // Draw the sprites with the path texture
-        self.pipelines.path_sprite_pipeline.draw_with_texture(
-            &devices.device_context,
-            slice::from_ref(&resources.path_intermediate_srv),
-            slice::from_ref(&self.globals.sampler),
-            sprites.len() as u32,
+            self.globals
+                .batch_params_buffer
+                .as_ref()
+                .context("batch params buffer missing")?,
+            tile_range.start as u32,
+            tile_range.len() as u32,
         )
     }
 
@@ -745,7 +1017,9 @@ impl DirectXRenderer {
             return Ok(());
         }
         let devices = self.devices.as_ref().context("devices missing")?;
-        let texture_view = self.atlas.get_texture_view(texture_id);
+        let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
+            return Ok(());
+        };
         self.pipelines.mono_sprites.draw_range_with_texture(
             &devices.device_context,
             &texture_view,
@@ -769,7 +1043,9 @@ impl DirectXRenderer {
             return Ok(());
         }
         let devices = self.devices.as_ref().context("devices missing")?;
-        let texture_view = self.atlas.get_texture_view(texture_id);
+        let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
+            return Ok(());
+        };
         self.pipelines.subpixel_sprites.draw_range_with_texture(
             &devices.device_context,
             &texture_view,
@@ -793,7 +1069,9 @@ impl DirectXRenderer {
             return Ok(());
         }
         let devices = self.devices.as_ref().context("devices missing")?;
-        let texture_view = self.atlas.get_texture_view(texture_id);
+        let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
+            return Ok(());
+        };
         self.pipelines.poly_sprites.draw_range_with_texture(
             &devices.device_context,
             &texture_view,
@@ -886,10 +1164,8 @@ impl DirectXResources {
         let (
             render_target,
             render_target_view,
-            path_intermediate_texture,
-            path_intermediate_srv,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
+            depth_stencil_texture,
+            depth_stencil_view,
             viewport,
         ) = create_resources(devices, &swap_chain, width, height)?;
         set_rasterizer_state(&devices.device, &devices.device_context)?;
@@ -898,10 +1174,8 @@ impl DirectXResources {
             swap_chain,
             render_target: Some(render_target),
             render_target_view,
-            path_intermediate_texture,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            path_intermediate_srv,
+            depth_stencil_texture,
+            depth_stencil_view,
             viewport,
         })
     }
@@ -916,18 +1190,14 @@ impl DirectXResources {
         let (
             render_target,
             render_target_view,
-            path_intermediate_texture,
-            path_intermediate_srv,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
+            depth_stencil_texture,
+            depth_stencil_view,
             viewport,
         ) = create_resources(devices, &self.swap_chain, width, height)?;
         self.render_target = Some(render_target);
         self.render_target_view = render_target_view;
-        self.path_intermediate_texture = path_intermediate_texture;
-        self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
-        self.path_intermediate_msaa_view = path_intermediate_msaa_view;
-        self.path_intermediate_srv = path_intermediate_srv;
+        self.depth_stencil_texture = depth_stencil_texture;
+        self.depth_stencil_view = depth_stencil_view;
         self.viewport = viewport;
         Ok(())
     }
@@ -949,20 +1219,15 @@ impl DirectXRenderPipelines {
             64,
             create_blend_state(device)?,
         )?;
-        let path_rasterization_pipeline = PipelineState::new(
+        let path_tile_pipeline = PipelineState::new(
             device,
-            "path_rasterization_pipeline",
-            ShaderModule::PathRasterization,
-            32,
-            create_blend_state_for_path_rasterization(device)?,
+            "path_tile_pipeline",
+            ShaderModule::PathTile,
+            64,
+            create_blend_state(device)?,
         )?;
-        let path_sprite_pipeline = PipelineState::new(
-            device,
-            "path_sprite_pipeline",
-            ShaderModule::PathSprite,
-            4,
-            create_blend_state_for_path_sprite(device)?,
-        )?;
+        let path_curves = StructuredBuffer::new(device, "path_curves", 256)?;
+        let path_paints = StructuredBuffer::new(device, "path_paints", 64)?;
         let underline_pipeline = PipelineState::new(
             device,
             "underline_pipeline",
@@ -991,12 +1256,15 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let opaque_quad_pipeline = OpaqueQuadPipeline::new(device)?;
 
         Ok(Self {
             shadow_pipeline,
             quad_pipeline,
-            path_rasterization_pipeline,
-            path_sprite_pipeline,
+            opaque_quad_pipeline,
+            path_tile_pipeline,
+            path_curves,
+            path_paints,
             underline_pipeline,
             mono_sprites,
             subpixel_sprites,
@@ -1008,22 +1276,296 @@ impl DirectXRenderPipelines {
 impl DirectComposition {
     pub fn new(dxgi_device: &IDXGIDevice, hwnd: HWND) -> Result<Self> {
         let comp_device = get_comp_device(dxgi_device)?;
-        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, true) }?;
-        let comp_visual = unsafe { comp_device.CreateVisual() }?;
+        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, false) }?;
+        let root_visual = unsafe { comp_device.CreateVisual() }?;
+        let base_visual = unsafe { comp_device.CreateVisual() }?;
+
+        unsafe {
+            root_visual.AddVisual(&base_visual, false, None)?;
+            comp_target.SetRoot(&root_visual)?;
+            comp_device.Commit()?;
+        }
 
         Ok(Self {
             comp_device,
             comp_target,
-            comp_visual,
+            root_visual,
+            base_visual,
+            gpui_visuals: RefCell::new(FxHashMap::default()),
         })
     }
 
     pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain1) -> Result<()> {
         unsafe {
-            self.comp_visual.SetContent(swap_chain)?;
-            self.comp_target.SetRoot(&self.comp_visual)?;
+            self.base_visual.SetContent(swap_chain)?;
             self.comp_device.Commit()?;
         }
+        Ok(())
+    }
+
+    pub fn set_gpui_swap_chain(
+        &self,
+        surface: CompositionSurfaceId,
+        swap_chain: &IDXGISwapChain1,
+    ) -> Result<()> {
+        let visual = unsafe { self.comp_device.CreateVisual()? };
+        unsafe {
+            visual.SetContent(swap_chain)?;
+            self.comp_device.Commit()?;
+        }
+        self.gpui_visuals.borrow_mut().insert(surface, visual);
+        Ok(())
+    }
+
+    fn create_portal_state(&self) -> Result<DirectCompositionPortalState> {
+        let visual = unsafe { self.comp_device.CreateVisual() }?;
+        let clip = unsafe { self.comp_device.CreateRectangleClip() }?;
+        unsafe {
+            visual.SetClip(&clip)?;
+        }
+        Ok(DirectCompositionPortalState {
+            comp_device: self.comp_device.clone(),
+            visual,
+            clip,
+            bounds: Cell::new(Bounds::default()),
+            parent_origin: Cell::new(Point::default()),
+            visible: Cell::new(true),
+            compositor_recreated_callback: RefCell::new(None),
+        })
+    }
+
+    fn rebind_portal(&self, state: &mut DirectCompositionPortalState) -> Result<()> {
+        let bounds = state.bounds.get();
+        let parent_origin = state.parent_origin.get();
+        let visible = state.visible.get();
+        let compositor_recreated_callback = state.compositor_recreated_callback.borrow().clone();
+        let replacement = self.create_portal_state()?;
+        let x = (bounds.origin.x - parent_origin.x).0 as f32;
+        let y = (bounds.origin.y - parent_origin.y).0 as f32;
+        let width = bounds.size.width.0.max(0) as f32;
+        let height = bounds.size.height.0.max(0) as f32;
+        unsafe {
+            replacement.visual.SetOffsetX2(x)?;
+            replacement.visual.SetOffsetY2(y)?;
+            replacement.clip.SetLeft2(0.0)?;
+            replacement.clip.SetTop2(0.0)?;
+            replacement.clip.SetRight2(width)?;
+            replacement.clip.SetBottom2(height)?;
+            replacement
+                .visual
+                .cast::<IDCompositionVisual3>()?
+                .SetOpacity2(if visible { 1.0 } else { 0.0 })?;
+        }
+        replacement.bounds.set(bounds);
+        replacement.parent_origin.set(parent_origin);
+        replacement.visible.set(visible);
+        *replacement.compositor_recreated_callback.borrow_mut() = compositor_recreated_callback;
+        *state = replacement;
+        Ok(())
+    }
+
+    fn set_surface_order(
+        &self,
+        surfaces: &[PlatformCompositionSurface],
+        base_surface: CompositionSurfaceId,
+    ) -> Result<()> {
+        let gpui_visuals = self.gpui_visuals.borrow();
+        let visuals = surfaces
+            .iter()
+            .map(|surface| match &surface.content {
+                PlatformCompositionSurfaceContent::Gpui if surface.id == base_surface => {
+                    Ok((surface.id, self.base_visual.clone()))
+                }
+                PlatformCompositionSurfaceContent::Gpui => gpui_visuals
+                    .get(&surface.id)
+                    .cloned()
+                    .map(|visual| (surface.id, visual))
+                    .context("GPUI composition visual is missing"),
+                PlatformCompositionSurfaceContent::Native(platform_surface)
+                | PlatformCompositionSurfaceContent::ExternalGpu(platform_surface) => {
+                    let handle = platform_surface.platform_handle()?;
+                    let unknown = handle.downcast::<windows::core::IUnknown>().map_err(|_| {
+                        anyhow::anyhow!("native surface is not a DirectComposition visual")
+                    })?;
+                    unknown
+                        .cast::<IDCompositionVisual>()
+                        .map(|visual| (surface.id, visual))
+                        .map_err(Into::into)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let visuals_by_id = visuals.iter().cloned().collect::<FxHashMap<_, _>>();
+        for surface in surfaces {
+            match &surface.content {
+                PlatformCompositionSurfaceContent::Gpui => {
+                    let visual = visuals_by_id
+                        .get(&surface.id)
+                        .context("GPUI composition visual is missing")?;
+                    unsafe {
+                        visual.SetOffsetX2(
+                            (surface.window_origin.x - surface.parent_origin.x).0 as f32,
+                        )?;
+                        visual.SetOffsetY2(
+                            (surface.window_origin.y - surface.parent_origin.y).0 as f32,
+                        )?;
+                    }
+                }
+                PlatformCompositionSurfaceContent::Native(platform_surface)
+                | PlatformCompositionSurfaceContent::ExternalGpu(platform_surface) => {
+                    platform_surface.set_parent_origin(surface.parent_origin)?;
+                }
+            }
+        }
+        unsafe {
+            self.root_visual.RemoveAllVisuals()?;
+            for surface in surfaces {
+                if matches!(surface.content, PlatformCompositionSurfaceContent::Gpui) {
+                    visuals_by_id
+                        .get(&surface.id)
+                        .context("GPUI composition visual is missing")?
+                        .RemoveAllVisuals()?;
+                }
+            }
+            let mut previous_by_parent = FxHashMap::default();
+            for surface in surfaces {
+                let visual = visuals_by_id
+                    .get(&surface.id)
+                    .context("composition visual is missing")?;
+                let parent = surface.parent.and_then(|parent| visuals_by_id.get(&parent));
+                let container = parent.unwrap_or(&self.root_visual);
+                let previous = previous_by_parent.get(&surface.parent);
+                container.AddVisual(visual, true, previous)?;
+                previous_by_parent.insert(surface.parent, visual.clone());
+            }
+            self.comp_device.Commit()?;
+        }
+        Ok(())
+    }
+
+    fn retain_gpui_surfaces(&self, surfaces: &FxHashSet<CompositionSurfaceId>) {
+        self.gpui_visuals
+            .borrow_mut()
+            .retain(|id, _| surfaces.contains(id));
+    }
+}
+
+impl PlatformSurfaceAttachment for DirectCompositionPortal {
+    fn set_bounds(&self, bounds: Bounds<DevicePixels>) -> Result<()> {
+        let state = self.state.borrow();
+        let parent_origin = state.parent_origin.get();
+        let x = (bounds.origin.x - parent_origin.x).0 as f32;
+        let y = (bounds.origin.y - parent_origin.y).0 as f32;
+        let width = bounds.size.width.0.max(0) as f32;
+        let height = bounds.size.height.0.max(0) as f32;
+        unsafe {
+            state.visual.SetOffsetX2(x)?;
+            state.visual.SetOffsetY2(y)?;
+            state.clip.SetLeft2(0.0)?;
+            state.clip.SetTop2(0.0)?;
+            state.clip.SetRight2(width)?;
+            state.clip.SetBottom2(height)?;
+            state.comp_device.Commit()?;
+        }
+        state.bounds.set(bounds);
+        Ok(())
+    }
+
+    fn bounds(&self) -> Bounds<DevicePixels> {
+        self.state.borrow().bounds.get()
+    }
+
+    fn set_parent_origin(&self, origin: Point<DevicePixels>) -> Result<()> {
+        let bounds = {
+            let state = self.state.borrow();
+            state.parent_origin.set(origin);
+            state.bounds.get()
+        };
+        self.set_bounds(bounds)
+    }
+
+    fn set_visible(&self, visible: bool) -> Result<()> {
+        let state = self.state.borrow();
+        if state.visible.get() != visible {
+            unsafe {
+                state
+                    .visual
+                    .cast::<IDCompositionVisual3>()?
+                    .SetOpacity2(if visible { 1.0 } else { 0.0 })?;
+                state.comp_device.Commit()?;
+            }
+            state.visible.set(visible);
+        }
+        Ok(())
+    }
+
+    fn compositor_recreated(&self, _platform_context: &dyn std::any::Any) -> Result<()> {
+        let callback = self
+            .state
+            .borrow()
+            .compositor_recreated_callback
+            .borrow()
+            .clone();
+        if let Some(callback) = callback {
+            callback(self.platform_handle()?)?;
+        }
+        Ok(())
+    }
+
+    fn set_compositor_recreated_callback(
+        &self,
+        callback: Rc<dyn Fn(Box<dyn std::any::Any>) -> Result<()>>,
+    ) -> Result<()> {
+        *self
+            .state
+            .borrow()
+            .compositor_recreated_callback
+            .borrow_mut() = Some(callback);
+        Ok(())
+    }
+
+    fn platform_handle(&self) -> Result<Box<dyn std::any::Any>> {
+        Ok(Box::new(
+            self.state
+                .borrow()
+                .visual
+                .cast::<windows::core::IUnknown>()?,
+        ))
+    }
+}
+
+impl OverlayResources {
+    fn new(devices: &DirectXRendererDevices, width: u32, height: u32) -> Result<Self> {
+        let swap_chain = create_swap_chain_for_composition(
+            &devices.dxgi_factory,
+            &devices.device,
+            width,
+            height,
+        )?;
+        let (render_target, render_target_view) =
+            create_render_target_and_its_view(&swap_chain, &devices.device)?;
+        Ok(Self {
+            swap_chain,
+            render_target: Some(render_target),
+            render_target_view,
+        })
+    }
+
+    fn resize(&mut self, devices: &DirectXRendererDevices, width: u32, height: u32) -> Result<()> {
+        self.render_target.take();
+        self.render_target_view.take();
+        unsafe {
+            self.swap_chain.ResizeBuffers(
+                BUFFER_COUNT as u32,
+                width,
+                height,
+                RENDER_TARGET_FORMAT,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )?;
+        }
+        let (render_target, render_target_view) =
+            create_render_target_and_its_view(&self.swap_chain, &devices.device)?;
+        self.render_target = Some(render_target);
+        self.render_target_view = render_target_view;
         Ok(())
     }
 }
@@ -1067,7 +1609,8 @@ struct GlobalParams {
     grayscale_enhanced_contrast: f32,
     subpixel_enhanced_contrast: f32,
     is_bgr: u32,
-    _pad: [u32; 3],
+    depth_scale: f32,
+    _pad: [u32; 2],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1077,17 +1620,71 @@ struct BatchParams {
     _padding: [u32; 3],
 }
 
-const _: () = assert!(std::mem::size_of::<BatchParams>() == 16);
+struct StructuredBuffer<T> {
+    label: &'static str,
+    buffer: ID3D11Buffer,
+    capacity: usize,
+    view: Option<ID3D11ShaderResourceView>,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> StructuredBuffer<T> {
+    fn new(device: &ID3D11Device, label: &'static str, capacity: usize) -> Result<Self> {
+        let buffer = create_buffer(device, std::mem::size_of::<T>(), capacity)?;
+        let view = create_buffer_view(device, &buffer)?;
+        Ok(StructuredBuffer {
+            label,
+            buffer,
+            capacity,
+            view,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    fn write(
+        &mut self,
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+        data: &[T],
+    ) -> Result<()> {
+        self.ensure_capacity(device, data.len())?;
+        update_buffer(device_context, &self.buffer, data)
+    }
+
+    fn ensure_capacity(&mut self, device: &ID3D11Device, len: usize) -> Result<()> {
+        if self.capacity < len {
+            let element_size = std::mem::size_of::<T>().max(1);
+            let required_size = len.checked_mul(element_size);
+            anyhow::ensure!(
+                required_size.is_some_and(|size| size <= MAX_INSTANCE_BUFFER_SIZE),
+                "{} buffer needs {len} elements of {element_size} bytes, above the maximum of {MAX_INSTANCE_BUFFER_SIZE} bytes",
+                self.label
+            );
+            let new_capacity = len
+                .next_power_of_two()
+                .min(MAX_INSTANCE_BUFFER_SIZE / element_size);
+            log::debug!(
+                "Updating {} buffer size from {} to {}",
+                self.label,
+                self.capacity,
+                new_capacity
+            );
+            let buffer = create_buffer(device, std::mem::size_of::<T>(), new_capacity)?;
+            let view = create_buffer_view(device, &buffer)?;
+            self.buffer = buffer;
+            self.view = view;
+            self.capacity = new_capacity;
+        }
+        Ok(())
+    }
+}
 
 struct PipelineState<T> {
-    label: &'static str,
     vertex: ID3D11VertexShader,
     fragment: ID3D11PixelShader,
-    buffer: ID3D11Buffer,
-    buffer_size: usize,
-    view: Option<ID3D11ShaderResourceView>,
+    instances: StructuredBuffer<T>,
     blend_state: ID3D11BlendState,
-    _marker: std::marker::PhantomData<T>,
+    depth_stencil_state: ID3D11DepthStencilState,
 }
 
 impl<T> PipelineState<T> {
@@ -1106,18 +1703,13 @@ impl<T> PipelineState<T> {
             let raw_shader = RawShaderBytes::new(shader_module, ShaderTarget::Fragment)?;
             create_fragment_shader(device, raw_shader.as_bytes())?
         };
-        let buffer = create_buffer(device, std::mem::size_of::<T>(), buffer_size)?;
-        let view = create_buffer_view(device, &buffer)?;
 
         Ok(PipelineState {
-            label,
             vertex,
             fragment,
-            buffer,
-            buffer_size,
-            view,
+            instances: StructuredBuffer::new(device, label, buffer_size)?,
             blend_state,
-            _marker: std::marker::PhantomData,
+            depth_stencil_state: create_depth_stencil_state(device, D3D11_DEPTH_WRITE_MASK_ZERO)?,
         })
     }
 
@@ -1127,77 +1719,7 @@ impl<T> PipelineState<T> {
         device_context: &ID3D11DeviceContext,
         data: &[T],
     ) -> Result<()> {
-        if self.buffer_size < data.len() {
-            let element_size = std::mem::size_of::<T>();
-            let required_size = std::mem::size_of_val(data);
-            anyhow::ensure!(
-                required_size <= MAX_INSTANCE_BUFFER_SIZE,
-                "{} buffer needs {required_size} bytes, above the maximum of {MAX_INSTANCE_BUFFER_SIZE}",
-                self.label
-            );
-            let new_buffer_size = data
-                .len()
-                .next_power_of_two()
-                .min(MAX_INSTANCE_BUFFER_SIZE / element_size);
-            log::debug!(
-                "Updating {} buffer size from {} to {}",
-                self.label,
-                self.buffer_size,
-                new_buffer_size
-            );
-            let buffer = create_buffer(device, std::mem::size_of::<T>(), new_buffer_size)?;
-            let view = create_buffer_view(device, &buffer)?;
-            self.buffer = buffer;
-            self.view = view;
-            self.buffer_size = new_buffer_size;
-        }
-        update_buffer(device_context, &self.buffer, data)
-    }
-
-    fn draw(
-        &self,
-        device_context: &ID3D11DeviceContext,
-        topology: D3D_PRIMITIVE_TOPOLOGY,
-        vertex_count: u32,
-        instance_count: u32,
-    ) -> Result<()> {
-        set_pipeline_state(
-            device_context,
-            slice::from_ref(&self.view),
-            topology,
-            &self.vertex,
-            &self.fragment,
-            &self.blend_state,
-        );
-        unsafe {
-            device_context.DrawInstanced(vertex_count, instance_count, 0, 0);
-        }
-        Ok(())
-    }
-
-    fn draw_with_texture(
-        &self,
-        device_context: &ID3D11DeviceContext,
-        texture: &[Option<ID3D11ShaderResourceView>],
-        sampler: &[Option<ID3D11SamplerState>],
-        instance_count: u32,
-    ) -> Result<()> {
-        set_pipeline_state(
-            device_context,
-            slice::from_ref(&self.view),
-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
-            &self.vertex,
-            &self.fragment,
-            &self.blend_state,
-        );
-        unsafe {
-            device_context.PSSetSamplers(0, Some(sampler));
-            device_context.VSSetShaderResources(0, Some(texture));
-            device_context.PSSetShaderResources(0, Some(texture));
-
-            device_context.DrawInstanced(4, instance_count, 0, 0);
-        }
-        Ok(())
+        self.instances.write(device, device_context, data)
     }
 
     fn draw_range(
@@ -1207,19 +1729,16 @@ impl<T> PipelineState<T> {
         first_instance: u32,
         instance_count: u32,
     ) -> Result<()> {
-        anyhow::ensure!(
-            first_instance as usize + instance_count as usize <= self.buffer_size,
-            "DirectX instance range exceeds the {} buffer",
-            self.label
-        );
+        self.ensure_range(first_instance, instance_count)?;
         update_batch_start(device_context, batch_params_buffer, first_instance)?;
         set_pipeline_state(
             device_context,
-            slice::from_ref(&self.view),
+            slice::from_ref(&self.instances.view),
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             &self.vertex,
             &self.fragment,
             &self.blend_state,
+            &self.depth_stencil_state,
         );
         unsafe {
             device_context.DrawInstanced(4, instance_count, 0, 0);
@@ -1236,19 +1755,16 @@ impl<T> PipelineState<T> {
         first_instance: u32,
         instance_count: u32,
     ) -> Result<()> {
-        anyhow::ensure!(
-            first_instance as usize + instance_count as usize <= self.buffer_size,
-            "DirectX instance range exceeds the {} buffer",
-            self.label
-        );
+        self.ensure_range(first_instance, instance_count)?;
         update_batch_start(device_context, batch_params_buffer, first_instance)?;
         set_pipeline_state(
             device_context,
-            slice::from_ref(&self.view),
+            slice::from_ref(&self.instances.view),
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             &self.vertex,
             &self.fragment,
             &self.blend_state,
+            &self.depth_stencil_state,
         );
         unsafe {
             device_context.PSSetSamplers(0, Some(sampler));
@@ -1258,21 +1774,72 @@ impl<T> PipelineState<T> {
         }
         Ok(())
     }
+
+    fn ensure_range(&self, first_instance: u32, instance_count: u32) -> Result<()> {
+        anyhow::ensure!(
+            first_instance as usize + instance_count as usize <= self.instances.capacity,
+            "DirectX instance range exceeds the {} buffer",
+            self.instances.label
+        );
+        Ok(())
+    }
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct PathRasterizationSprite {
-    xy_position: Point<ScaledPixels>,
-    st_position: Point<f32>,
-    color: Background,
-    bounds: Bounds<ScaledPixels>,
+/// Draws opaque rectangles ahead of everything else, writing depth so that
+/// later passes skip the pixels they cover.
+struct OpaqueQuadPipeline {
+    vertex: ID3D11VertexShader,
+    fragment: ID3D11PixelShader,
+    blend_state: ID3D11BlendState,
+    depth_stencil_state: ID3D11DepthStencilState,
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct PathSprite {
-    bounds: Bounds<ScaledPixels>,
+impl OpaqueQuadPipeline {
+    fn new(device: &ID3D11Device) -> Result<Self> {
+        let vertex = {
+            let raw_shader = RawShaderBytes::new(ShaderModule::OpaqueQuad, ShaderTarget::Vertex)?;
+            create_vertex_shader(device, raw_shader.as_bytes())?
+        };
+        let fragment = {
+            let raw_shader = RawShaderBytes::new(ShaderModule::OpaqueQuad, ShaderTarget::Fragment)?;
+            create_fragment_shader(device, raw_shader.as_bytes())?
+        };
+        Ok(OpaqueQuadPipeline {
+            vertex,
+            fragment,
+            blend_state: create_opaque_blend_state(device)?,
+            depth_stencil_state: create_depth_stencil_state(device, D3D11_DEPTH_WRITE_MASK_ALL)?,
+        })
+    }
+
+    /// Draws every quad, last first. The vertex shader drops all but opaque
+    /// rectangles.
+    fn draw(
+        &self,
+        device_context: &ID3D11DeviceContext,
+        quad_pipeline: &PipelineState<Quad>,
+        batch_params_buffer: &ID3D11Buffer,
+        quad_count: u32,
+    ) -> Result<()> {
+        if quad_count == 0 {
+            return Ok(());
+        }
+        quad_pipeline.ensure_range(0, quad_count)?;
+        // Drawing front to back lets the depth test skip pixels that a later
+        // quad already covers.
+        update_batch_start(device_context, batch_params_buffer, quad_count - 1)?;
+        set_pipeline_state(
+            device_context,
+            slice::from_ref(&quad_pipeline.instances.view),
+            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+            &self.vertex,
+            &self.fragment,
+            &self.blend_state,
+            &self.depth_stencil_state,
+        );
+        unsafe { device_context.DrawInstanced(4, quad_count, 0, 0) };
+        Ok(())
+    }
 }
 
 impl Drop for DirectXRenderer {
@@ -1356,32 +1923,19 @@ fn create_resources(
     ID3D11Texture2D,
     Option<ID3D11RenderTargetView>,
     ID3D11Texture2D,
-    Option<ID3D11ShaderResourceView>,
-    ID3D11Texture2D,
-    Option<ID3D11RenderTargetView>,
+    Option<ID3D11DepthStencilView>,
     D3D11_VIEWPORT,
 )> {
     let (render_target, render_target_view) =
         create_render_target_and_its_view(swap_chain, &devices.device)?;
-    let (path_intermediate_texture, path_intermediate_srv) =
-        create_path_intermediate_texture(&devices.device, width, height)?;
-    let (path_intermediate_msaa_texture, path_intermediate_msaa_view) =
-        create_path_intermediate_msaa_texture_and_view(&devices.device, width, height)?;
-    let viewport = D3D11_VIEWPORT {
-        TopLeftX: 0.0,
-        TopLeftY: 0.0,
-        Width: width as f32,
-        Height: height as f32,
-        MinDepth: 0.0,
-        MaxDepth: 1.0,
-    };
+    let (depth_stencil_texture, depth_stencil_view) =
+        create_depth_stencil_texture_and_view(&devices.device, width, height)?;
+    let viewport = set_viewport(&devices.device_context, width as f32, height as f32);
     Ok((
         render_target,
         render_target_view,
-        path_intermediate_texture,
-        path_intermediate_srv,
-        path_intermediate_msaa_texture,
-        path_intermediate_msaa_view,
+        depth_stencil_texture,
+        depth_stencil_view,
         viewport,
     ))
 }
@@ -1398,11 +1952,25 @@ fn create_render_target_and_its_view(
 }
 
 #[inline]
-fn create_path_intermediate_texture(
+fn set_viewport(device_context: &ID3D11DeviceContext, width: f32, height: f32) -> D3D11_VIEWPORT {
+    let viewport = [D3D11_VIEWPORT {
+        TopLeftX: 0.0,
+        TopLeftY: 0.0,
+        Width: width,
+        Height: height,
+        MinDepth: 0.0,
+        MaxDepth: 1.0,
+    }];
+    unsafe { device_context.RSSetViewports(Some(&viewport)) };
+    viewport[0]
+}
+
+#[inline]
+fn create_depth_stencil_texture_and_view(
     device: &ID3D11Device,
     width: u32,
     height: u32,
-) -> Result<(ID3D11Texture2D, Option<ID3D11ShaderResourceView>)> {
+) -> Result<(ID3D11Texture2D, Option<ID3D11DepthStencilView>)> {
     let texture = unsafe {
         let mut output = None;
         let desc = D3D11_TEXTURE2D_DESC {
@@ -1410,55 +1978,22 @@ fn create_path_intermediate_texture(
             Height: height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: RENDER_TARGET_FORMAT,
+            Format: DXGI_FORMAT_D32_FLOAT,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            BindFlags: D3D11_BIND_DEPTH_STENCIL.0 as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
         device.CreateTexture2D(&desc, None, Some(&mut output))?;
         output.unwrap()
     };
-
-    let mut shader_resource_view = None;
-    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut shader_resource_view))? };
-
-    Ok((texture, Some(shader_resource_view.unwrap())))
-}
-
-#[inline]
-fn create_path_intermediate_msaa_texture_and_view(
-    device: &ID3D11Device,
-    width: u32,
-    height: u32,
-) -> Result<(ID3D11Texture2D, Option<ID3D11RenderTargetView>)> {
-    let msaa_texture = unsafe {
-        let mut output = None;
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: RENDER_TARGET_FORMAT,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: PATH_MULTISAMPLE_COUNT,
-                Quality: D3D11_STANDARD_MULTISAMPLE_PATTERN.0 as u32,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        device.CreateTexture2D(&desc, None, Some(&mut output))?;
-        output.unwrap()
-    };
-    let mut msaa_view = None;
-    unsafe { device.CreateRenderTargetView(&msaa_texture, None, Some(&mut msaa_view))? };
-    Ok((msaa_texture, Some(msaa_view.unwrap())))
+    let mut view = None;
+    unsafe { device.CreateDepthStencilView(&texture, None, Some(&mut view))? };
+    Ok((texture, view))
 }
 
 #[inline]
@@ -1494,11 +2029,57 @@ fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
     desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
     desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
     desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
     desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
     unsafe {
         let mut state = None;
         device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+#[inline]
+fn create_opaque_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = false.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_ZERO;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+#[inline]
+fn create_depth_stencil_state(
+    device: &ID3D11Device,
+    write_mask: D3D11_DEPTH_WRITE_MASK,
+) -> Result<ID3D11DepthStencilState> {
+    let stencil_op = D3D11_DEPTH_STENCILOP_DESC {
+        StencilFailOp: D3D11_STENCIL_OP_KEEP,
+        StencilDepthFailOp: D3D11_STENCIL_OP_KEEP,
+        StencilPassOp: D3D11_STENCIL_OP_KEEP,
+        StencilFunc: D3D11_COMPARISON_ALWAYS,
+    };
+    let desc = D3D11_DEPTH_STENCIL_DESC {
+        DepthEnable: true.into(),
+        DepthWriteMask: write_mask,
+        DepthFunc: D3D11_COMPARISON_GREATER,
+        StencilEnable: false.into(),
+        StencilReadMask: D3D11_DEFAULT_STENCIL_READ_MASK as u8,
+        StencilWriteMask: D3D11_DEFAULT_STENCIL_WRITE_MASK as u8,
+        FrontFace: stencil_op,
+        BackFace: stencil_op,
+    };
+    unsafe {
+        let mut state = None;
+        device.CreateDepthStencilState(&desc, Some(&mut state))?;
         Ok(state.unwrap())
     }
 }
@@ -1517,46 +2098,6 @@ fn create_blend_state_for_subpixel_rendering(device: &ID3D11Device) -> Result<ID
     desc.RenderTarget[0].RenderTargetWriteMask =
         D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8 & !D3D11_COLOR_WRITE_ENABLE_ALPHA.0 as u8;
 
-    unsafe {
-        let mut state = None;
-        device.CreateBlendState(&desc, Some(&mut state))?;
-        Ok(state.unwrap())
-    }
-}
-
-#[inline]
-fn create_blend_state_for_path_rasterization(device: &ID3D11Device) -> Result<ID3D11BlendState> {
-    // If the feature level is set to greater than D3D_FEATURE_LEVEL_9_3, the display
-    // device performs the blend in linear space, which is ideal.
-    let mut desc = D3D11_BLEND_DESC::default();
-    desc.RenderTarget[0].BlendEnable = true.into();
-    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
-    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
-    unsafe {
-        let mut state = None;
-        device.CreateBlendState(&desc, Some(&mut state))?;
-        Ok(state.unwrap())
-    }
-}
-
-#[inline]
-fn create_blend_state_for_path_sprite(device: &ID3D11Device) -> Result<ID3D11BlendState> {
-    // If the feature level is set to greater than D3D_FEATURE_LEVEL_9_3, the display
-    // device performs the blend in linear space, which is ideal.
-    let mut desc = D3D11_BLEND_DESC::default();
-    desc.RenderTarget[0].BlendEnable = true.into();
-    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
-    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
-    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
     unsafe {
         let mut state = None;
         device.CreateBlendState(&desc, Some(&mut state))?;
@@ -1604,13 +2145,18 @@ fn create_buffer(
     element_size: usize,
     buffer_size: usize,
 ) -> Result<ID3D11Buffer> {
+    let byte_width = element_size
+        .checked_mul(buffer_size)
+        .and_then(|size| u32::try_from(size).ok())
+        .context("structured buffer size overflows u32")?;
     let desc = D3D11_BUFFER_DESC {
-        ByteWidth: (element_size * buffer_size) as u32,
+        ByteWidth: byte_width,
         Usage: D3D11_USAGE_DYNAMIC,
         BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
         CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
         MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32,
-        StructureByteStride: element_size as u32,
+        StructureByteStride: u32::try_from(element_size)
+            .context("structured buffer stride overflows u32")?,
     };
     let mut buffer = None;
     unsafe { device.CreateBuffer(&desc, None, Some(&mut buffer)) }?;
@@ -1666,6 +2212,7 @@ fn set_pipeline_state(
     vertex_shader: &ID3D11VertexShader,
     fragment_shader: &ID3D11PixelShader,
     blend_state: &ID3D11BlendState,
+    depth_stencil_state: &ID3D11DepthStencilState,
 ) {
     unsafe {
         device_context.VSSetShaderResources(1, Some(buffer_view));
@@ -1674,6 +2221,7 @@ fn set_pipeline_state(
         device_context.VSSetShader(vertex_shader, None);
         device_context.PSSetShader(fragment_shader, None);
         device_context.OMSetBlendState(blend_state, None, 0xFFFFFFFF);
+        device_context.OMSetDepthStencilState(depth_stencil_state, 0);
     }
 }
 
@@ -1703,14 +2251,13 @@ pub(crate) mod shader_resources {
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) enum ShaderModule {
         Quad,
+        OpaqueQuad,
         Shadow,
         Underline,
-        PathRasterization,
-        PathSprite,
+        PathTile,
         MonochromeSprite,
         SubpixelSprite,
         PolychromeSprite,
-        EmojiRasterization,
     }
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1756,6 +2303,10 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
                     ShaderTarget::Fragment => QUAD_FRAGMENT_BYTES,
                 },
+                ShaderModule::OpaqueQuad => match target {
+                    ShaderTarget::Vertex => OPAQUE_QUAD_VERTEX_BYTES,
+                    ShaderTarget::Fragment => OPAQUE_QUAD_FRAGMENT_BYTES,
+                },
                 ShaderModule::Shadow => match target {
                     ShaderTarget::Vertex => SHADOW_VERTEX_BYTES,
                     ShaderTarget::Fragment => SHADOW_FRAGMENT_BYTES,
@@ -1764,13 +2315,9 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Vertex => UNDERLINE_VERTEX_BYTES,
                     ShaderTarget::Fragment => UNDERLINE_FRAGMENT_BYTES,
                 },
-                ShaderModule::PathRasterization => match target {
-                    ShaderTarget::Vertex => PATH_RASTERIZATION_VERTEX_BYTES,
-                    ShaderTarget::Fragment => PATH_RASTERIZATION_FRAGMENT_BYTES,
-                },
-                ShaderModule::PathSprite => match target {
-                    ShaderTarget::Vertex => PATH_SPRITE_VERTEX_BYTES,
-                    ShaderTarget::Fragment => PATH_SPRITE_FRAGMENT_BYTES,
+                ShaderModule::PathTile => match target {
+                    ShaderTarget::Vertex => PATH_TILE_VERTEX_BYTES,
+                    ShaderTarget::Fragment => PATH_TILE_FRAGMENT_BYTES,
                 },
                 ShaderModule::MonochromeSprite => match target {
                     ShaderTarget::Vertex => MONOCHROME_SPRITE_VERTEX_BYTES,
@@ -1784,10 +2331,6 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => POLYCHROME_SPRITE_FRAGMENT_BYTES,
                 },
-                ShaderModule::EmojiRasterization => match target {
-                    ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
-                    ShaderTarget::Fragment => EMOJI_RASTERIZATION_FRAGMENT_BYTES,
-                },
             };
             Self { inner: bytes }
         }
@@ -1798,12 +2341,6 @@ pub(crate) mod shader_resources {
         unsafe {
             use windows::Win32::Graphics::{
                 Direct3D::ID3DInclude, Hlsl::D3D_COMPILE_STANDARD_FILE_INCLUDE,
-            };
-
-            let shader_name = if matches!(entry, ShaderModule::EmojiRasterization) {
-                "color_text_raster.hlsl"
-            } else {
-                "shaders.hlsl"
             };
 
             let entry = format!(
@@ -1822,7 +2359,7 @@ pub(crate) mod shader_resources {
             let mut compile_blob = None;
             let mut error_blob = None;
             let shader_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(&format!("src/{}", shader_name))
+                .join("src/shaders.hlsl")
                 .canonicalize()?;
 
             let entry_point = PCSTR::from_raw(entry.as_ptr());
@@ -1867,14 +2404,13 @@ pub(crate) mod shader_resources {
         pub fn as_str(self) -> &'static str {
             match self {
                 ShaderModule::Quad => "quad",
+                ShaderModule::OpaqueQuad => "opaque_quad",
                 ShaderModule::Shadow => "shadow",
                 ShaderModule::Underline => "underline",
-                ShaderModule::PathRasterization => "path_rasterization",
-                ShaderModule::PathSprite => "path_sprite",
+                ShaderModule::PathTile => "path_tile",
                 ShaderModule::MonochromeSprite => "monochrome_sprite",
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
-                ShaderModule::EmojiRasterization => "emoji_rasterization",
             }
         }
     }

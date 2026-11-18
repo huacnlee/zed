@@ -3,16 +3,17 @@ use x11rb::connection::RequestConnection;
 
 use crate::linux::X11ClientStatePtr;
 use gpui::{
-    AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowKind, WindowParams, WindowVisibility, popup::PopupNotSupportedError,
-    px,
+    AnyWindowHandle, Bounds, ComposedScene, CompositionSurfaceId, Decorations, DevicePixels,
+    ForegroundExecutor, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformCompositionSurface,
+    PlatformCompositionSurfaceContent, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformSurfaceAttachment, PlatformWindow, Point, Primitive, PromptButton, PromptLevel,
+    RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size, Tiling, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowKind,
+    WindowParams, WindowVisibility, popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
 
-use collections::FxHashSet;
+use collections::{FxHashMap, FxHashSet};
 use gpui_util::{ResultExt, maybe};
 use raw_window_handle as rwh;
 use x11rb::{
@@ -21,6 +22,7 @@ use x11rb::{
     errors::ConnectionError,
     properties::{WmHints, WmSizeHints},
     protocol::{
+        shape::{self, ConnectionExt as _},
         sync,
         xinput::{self, ConnectionExt as _},
         xproto::{self, ClientMessageEvent, ConnectionExt, TranslateCoordinatesReply},
@@ -30,7 +32,14 @@ use x11rb::{
 };
 
 use std::{
-    cell::RefCell, ffi::c_void, fmt::Display, num::NonZeroU32, ptr::NonNull, rc::Rc, sync::Arc,
+    any::Any,
+    cell::RefCell,
+    ffi::c_void,
+    fmt::Display,
+    num::NonZeroU32,
+    ptr::NonNull,
+    rc::{Rc, Weak},
+    sync::Arc,
 };
 
 use super::{X11Display, XINPUT_ALL_DEVICE_GROUPS, XINPUT_ALL_DEVICES};
@@ -227,6 +236,473 @@ fn find_visuals(xcb: &XCBConnection, screen_index: usize) -> VisualSet {
     set
 }
 
+/// X11 draws every GPUI composition surface into the window itself: a child
+/// window with the same ARGB visual as its parent replaces the parent's pixels
+/// instead of blending over them, so GPUI overlays cannot be child windows.
+/// Native surfaces are child windows, and the GPUI content stacked above one
+/// is cut out of its shape so the window's pixels and input show through.
+struct X11Composition {
+    xcb: Rc<XCBConnection>,
+    x_window: xproto::Window,
+    depth: u8,
+    visual_id: u32,
+    base_surface: Option<CompositionSurfaceId>,
+    native_surfaces: Vec<Weak<RefCell<X11NativeSurfaceState>>>,
+    order: Vec<PlatformCompositionSurface>,
+    occluders: FxHashMap<CompositionSurfaceId, Vec<Bounds<DevicePixels>>>,
+}
+
+struct X11NativeSurfaceState {
+    xcb: Rc<XCBConnection>,
+    x_window: xproto::Window,
+    parent_window: xproto::Window,
+    bounds: Bounds<DevicePixels>,
+    parent_origin: Point<DevicePixels>,
+    visible: bool,
+    mapped: bool,
+    /// Window-coordinate rectangles of GPUI content stacked above this surface.
+    occluders: Vec<Bounds<DevicePixels>>,
+    applied_shape: Option<(Bounds<DevicePixels>, Vec<Bounds<DevicePixels>>)>,
+    destroyed: bool,
+}
+
+impl X11NativeSurfaceState {
+    fn apply(&mut self) -> anyhow::Result<()> {
+        if self.destroyed {
+            return Ok(());
+        }
+        let origin = self.bounds.origin - self.parent_origin;
+        check_reply(
+            || "X11 ConfigureWindow for a native surface failed.",
+            self.xcb.configure_window(
+                self.x_window,
+                &xproto::ConfigureWindowAux::new()
+                    .x(origin.x.0)
+                    .y(origin.y.0)
+                    .width(self.bounds.size.width.0.max(1) as u32)
+                    .height(self.bounds.size.height.0.max(1) as u32),
+            ),
+        )?;
+        self.apply_shape()?;
+        let should_map = self.visible && !self.bounds.is_empty();
+        if should_map != self.mapped {
+            if should_map {
+                check_reply(
+                    || "X11 MapWindow for a native surface failed.",
+                    self.xcb.map_window(self.x_window),
+                )?;
+            } else {
+                check_reply(
+                    || "X11 UnmapWindow for a native surface failed.",
+                    self.xcb.unmap_window(self.x_window),
+                )?;
+            }
+            self.mapped = should_map;
+        }
+        xcb_flush(&self.xcb);
+        Ok(())
+    }
+
+    fn apply_shape(&mut self) -> anyhow::Result<()> {
+        let local_bounds = Bounds::new(Point::default(), self.bounds.size);
+        let cutouts = self
+            .occluders
+            .iter()
+            .map(|occluder| {
+                let occluder = Bounds::new(occluder.origin - self.bounds.origin, occluder.size);
+                occluder.intersect(&local_bounds)
+            })
+            .filter(|occluder| !occluder.is_empty())
+            .collect::<Vec<_>>();
+        let shape = (self.bounds, cutouts);
+        if self.applied_shape.as_ref() == Some(&shape) {
+            return Ok(());
+        }
+        let (_, cutouts) = &shape;
+        if cutouts.is_empty() {
+            check_reply(
+                || "X11 ShapeMask reset for a native surface failed.",
+                self.xcb.shape_mask(
+                    shape::SO::SET,
+                    shape::SK::BOUNDING,
+                    self.x_window,
+                    0,
+                    0,
+                    x11rb::NONE,
+                ),
+            )?;
+        } else {
+            check_reply(
+                || "X11 ShapeRectangles for a native surface failed.",
+                self.xcb.shape_rectangles(
+                    shape::SO::SET,
+                    shape::SK::BOUNDING,
+                    xproto::ClipOrdering::UNSORTED,
+                    self.x_window,
+                    0,
+                    0,
+                    &[x11_rectangle(local_bounds)],
+                ),
+            )?;
+            check_reply(
+                || "X11 ShapeRectangles cutout for a native surface failed.",
+                self.xcb.shape_rectangles(
+                    shape::SO::SUBTRACT,
+                    shape::SK::BOUNDING,
+                    xproto::ClipOrdering::UNSORTED,
+                    self.x_window,
+                    0,
+                    0,
+                    &cutouts
+                        .iter()
+                        .copied()
+                        .map(x11_rectangle)
+                        .collect::<Vec<_>>(),
+                ),
+            )?;
+        }
+        self.applied_shape = Some(shape);
+        Ok(())
+    }
+
+    fn destroy(&mut self) {
+        if std::mem::replace(&mut self.destroyed, true) {
+            return;
+        }
+        check_reply(
+            || "X11 DestroyWindow for a native surface failed.",
+            self.xcb.destroy_window(self.x_window),
+        )
+        .log_err();
+        xcb_flush(&self.xcb);
+    }
+}
+
+fn x11_rectangle(bounds: Bounds<DevicePixels>) -> xproto::Rectangle {
+    xproto::Rectangle {
+        x: bounds.origin.x.0.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        y: bounds.origin.y.0.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        width: bounds.size.width.0.clamp(0, u16::MAX as i32) as u16,
+        height: bounds.size.height.0.clamp(0, u16::MAX as i32) as u16,
+    }
+}
+
+/// Past this many rectangles an occluding surface is cut out by its bounding
+/// box, which keeps shape requests small for text-heavy overlays.
+const MAX_OCCLUDER_RECTANGLES: usize = 256;
+
+/// Returns the device-pixel rectangles covered by a scene's primitives.
+///
+/// Shadows are left out: a cutout can only show the window's pixels, not blend
+/// a translucent shadow over the native content, so cutting out a shadow would
+/// replace native content with GPUI's background around every overlay.
+fn scene_occluders(scene: &Scene) -> Vec<Bounds<DevicePixels>> {
+    fn clipped(
+        bounds: Bounds<ScaledPixels>,
+        content_mask: &gpui::ContentMask<ScaledPixels>,
+    ) -> Bounds<ScaledPixels> {
+        bounds.intersect(&content_mask.bounds)
+    }
+
+    let mut rectangles = Vec::new();
+    rectangles.extend(
+        scene
+            .quads
+            .iter()
+            .map(|quad| clipped(quad.bounds, &quad.content_mask)),
+    );
+    rectangles.extend(scene.paths.iter().map(|path| {
+        let path = Primitive::from(path.clone());
+        clipped(*path.bounds(), path.content_mask())
+    }));
+    rectangles.extend(
+        scene
+            .underlines
+            .iter()
+            .map(|underline| clipped(underline.bounds, &underline.content_mask)),
+    );
+    rectangles.extend(
+        scene
+            .monochrome_sprites
+            .iter()
+            .map(|sprite| clipped(sprite.bounds, &sprite.content_mask)),
+    );
+    rectangles.extend(
+        scene
+            .subpixel_sprites
+            .iter()
+            .map(|sprite| clipped(sprite.bounds, &sprite.content_mask)),
+    );
+    rectangles.extend(
+        scene
+            .polychrome_sprites
+            .iter()
+            .map(|sprite| clipped(sprite.bounds, &sprite.content_mask)),
+    );
+    rectangles.extend(
+        scene
+            .surfaces
+            .iter()
+            .map(|surface| clipped(surface.bounds, &surface.content_mask)),
+    );
+
+    let mut rectangles = rectangles
+        .into_iter()
+        .map(|bounds| {
+            let origin = bounds
+                .origin
+                .map(|value| DevicePixels(value.0.floor() as i32));
+            let corner = bounds
+                .bottom_right()
+                .map(|value| DevicePixels(value.0.ceil() as i32));
+            Bounds::from_corners(origin, corner)
+        })
+        .filter(|bounds| !bounds.is_empty())
+        .collect::<Vec<_>>();
+
+    // Content usually sits on a background quad, so most rectangles are
+    // covered by a larger one.
+    rectangles.sort_by_key(|bounds| std::cmp::Reverse(bounds.size.width.0 * bounds.size.height.0));
+    let mut kept: Vec<Bounds<DevicePixels>> = Vec::new();
+    for rectangle in rectangles {
+        let covered = kept.iter().any(|kept| {
+            kept.origin.x <= rectangle.origin.x
+                && kept.origin.y <= rectangle.origin.y
+                && kept.bottom_right().x >= rectangle.bottom_right().x
+                && kept.bottom_right().y >= rectangle.bottom_right().y
+        });
+        if !covered {
+            kept.push(rectangle);
+        }
+    }
+    if kept.len() > MAX_OCCLUDER_RECTANGLES {
+        let union = kept
+            .iter()
+            .copied()
+            .reduce(|union, bounds| union.union(&bounds))
+            .into_iter()
+            .collect();
+        return union;
+    }
+    kept
+}
+
+/// A child window slot for content produced outside GPUI's renderer. Its
+/// `platform_handle` is a `raw_window_handle::RawWindowHandle::Xcb`, which the
+/// producer must stop presenting to before this attachment is dropped.
+struct X11NativeSurface {
+    state: Rc<RefCell<X11NativeSurfaceState>>,
+    visual_id: u32,
+}
+
+impl PlatformSurfaceAttachment for X11NativeSurface {
+    fn set_bounds(&self, bounds: Bounds<DevicePixels>) -> anyhow::Result<()> {
+        let mut state = self.state.borrow_mut();
+        state.bounds = bounds;
+        state.apply()
+    }
+
+    fn bounds(&self) -> Bounds<DevicePixels> {
+        self.state.borrow().bounds
+    }
+
+    fn set_parent_origin(&self, origin: Point<DevicePixels>) -> anyhow::Result<()> {
+        let mut state = self.state.borrow_mut();
+        state.parent_origin = origin;
+        state.apply()
+    }
+
+    fn set_visible(&self, visible: bool) -> anyhow::Result<()> {
+        let mut state = self.state.borrow_mut();
+        state.visible = visible;
+        state.apply()
+    }
+
+    fn platform_handle(&self) -> anyhow::Result<Box<dyn Any>> {
+        let window = NonZeroU32::new(self.state.borrow().x_window)
+            .context("native surface has no X11 window")?;
+        let mut handle = rwh::XcbWindowHandle::new(window);
+        handle.visual_id = NonZeroU32::new(self.visual_id);
+        Ok(Box::new(rwh::RawWindowHandle::Xcb(handle)))
+    }
+}
+
+impl Drop for X11NativeSurface {
+    fn drop(&mut self) {
+        self.state.borrow_mut().destroy();
+    }
+}
+
+impl X11Composition {
+    fn create_native_surface(&mut self) -> anyhow::Result<Rc<RefCell<X11NativeSurfaceState>>> {
+        let window = self.xcb.generate_id()?;
+        check_reply(
+            || "X11 CreateWindow for a native surface failed.",
+            self.xcb.create_window(
+                self.depth,
+                window,
+                self.x_window,
+                0,
+                0,
+                1,
+                1,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                self.visual_id,
+                &xproto::CreateWindowAux::new(),
+            ),
+        )?;
+        // Selecting pointer events here keeps them from propagating to the
+        // GPUI window, which would otherwise treat them as its own input.
+        let selected = check_reply(
+            || "X11 XiSelectEvents for a native surface failed.",
+            self.xcb.xinput_xi_select_events(
+                window,
+                &[xinput::EventMask {
+                    deviceid: XINPUT_ALL_DEVICE_GROUPS,
+                    mask: vec![
+                        xinput::XIEventMask::MOTION
+                            | xinput::XIEventMask::BUTTON_PRESS
+                            | xinput::XIEventMask::BUTTON_RELEASE,
+                    ],
+                }],
+            ),
+        );
+        if let Err(error) = selected {
+            check_reply(
+                || "X11 DestroyWindow for a native surface failed.",
+                self.xcb.destroy_window(window),
+            )
+            .log_err();
+            return Err(error);
+        }
+        xcb_flush(&self.xcb);
+        let state = Rc::new(RefCell::new(X11NativeSurfaceState {
+            xcb: self.xcb.clone(),
+            x_window: window,
+            parent_window: self.x_window,
+            bounds: Bounds::default(),
+            parent_origin: Point::default(),
+            visible: true,
+            mapped: false,
+            occluders: Vec::new(),
+            applied_shape: None,
+            destroyed: false,
+        }));
+        self.native_surfaces.push(Rc::downgrade(&state));
+        Ok(state)
+    }
+
+    fn native_surface(
+        &mut self,
+        attachment: &dyn PlatformSurfaceAttachment,
+    ) -> anyhow::Result<Rc<RefCell<X11NativeSurfaceState>>> {
+        let handle = attachment
+            .platform_handle()?
+            .downcast::<rwh::RawWindowHandle>()
+            .map_err(|_| anyhow!("native surface is not backed by an X11 window"))?;
+        let rwh::RawWindowHandle::Xcb(handle) = *handle else {
+            anyhow::bail!("native surface is not backed by an X11 window");
+        };
+        self.native_surfaces
+            .retain(|surface| surface.strong_count() > 0);
+        self.native_surfaces
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|surface| surface.borrow().x_window == handle.window.get())
+            .context("native surface belongs to another window")
+    }
+
+    fn apply_order(&mut self) -> anyhow::Result<()> {
+        let base = self
+            .base_surface
+            .context("composition has no GPUI base surface")?;
+        let order = self.order.clone();
+        let mut native_states = FxHashMap::default();
+        for surface in &order {
+            if let PlatformCompositionSurfaceContent::Native(attachment)
+            | PlatformCompositionSurfaceContent::ExternalGpu(attachment) = &surface.content
+            {
+                native_states.insert(surface.id, self.native_surface(attachment.as_ref())?);
+            }
+        }
+
+        let mut origins = FxHashMap::default();
+        for surface in &order {
+            origins.insert(surface.id, surface.window_origin);
+        }
+        origins.insert(base, Point::default());
+
+        for (index, surface) in order.iter().enumerate() {
+            let Some(state) = native_states.get(&surface.id) else {
+                continue;
+            };
+            // A native child can only nest inside another native child; GPUI
+            // surfaces are all drawn into the window itself.
+            let (parent_window, parent_origin) = surface
+                .parent
+                .and_then(|parent| {
+                    native_states.get(&parent).map(|parent_state| {
+                        (
+                            parent_state.borrow().x_window,
+                            origins.get(&parent).copied().unwrap_or_default(),
+                        )
+                    })
+                })
+                .unwrap_or((self.x_window, Point::default()));
+
+            let occluders = order[index + 1..]
+                .iter()
+                .filter(|above| above.id != base)
+                .filter_map(|above| self.occluders.get(&above.id))
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+
+            let mut state = state.borrow_mut();
+            if state.parent_window != parent_window {
+                check_reply(
+                    || "X11 ReparentWindow for a native surface failed.",
+                    self.xcb
+                        .reparent_window(state.x_window, parent_window, 0, 0),
+                )?;
+                state.parent_window = parent_window;
+                // Reparenting unmaps a mapped window.
+                state.mapped = false;
+            }
+            state.parent_origin = parent_origin;
+            if let Some(bounds) = surface.window_bounds {
+                state.bounds = bounds;
+            }
+            state.occluders = occluders;
+            // Raising each surface in bottom-to-top order leaves siblings
+            // stacked in composition order.
+            check_reply(
+                || "X11 ConfigureWindow stacking for a native surface failed.",
+                self.xcb.configure_window(
+                    state.x_window,
+                    &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
+                ),
+            )?;
+            state.apply()?;
+        }
+        Ok(())
+    }
+
+    fn destroy(&mut self) {
+        for surface in self
+            .native_surfaces
+            .drain(..)
+            .filter_map(|surface| surface.upgrade())
+        {
+            surface.borrow_mut().destroy();
+        }
+        self.order.clear();
+        self.occluders.clear();
+        self.base_surface = None;
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RawWindow {
     connection: *mut c_void,
@@ -257,7 +733,6 @@ pub struct Callbacks {
 }
 
 pub struct X11WindowState {
-    pub destroyed: bool,
     parent: Option<X11WindowStatePtr>,
     children: FxHashSet<xproto::Window>,
     client: X11ClientStatePtr,
@@ -270,7 +745,10 @@ pub struct X11WindowState {
     pub(crate) last_sync_counter: Option<sync::Int64>,
     bounds: Bounds<Pixels>,
     scale_factor: f32,
-    renderer: WgpuRenderer,
+    /// Taken when the window is dropped. Its GPU objects use the X connection, so they mustn't
+    /// outlive the window, which a display mode switch relies on.
+    renderer: Option<WgpuRenderer>,
+    composition: Rc<RefCell<X11Composition>>,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
     appearance: WindowAppearance,
@@ -296,6 +774,18 @@ pub struct X11WindowState {
 impl X11WindowState {
     fn is_transparent(&self) -> bool {
         self.background_appearance != WindowBackgroundAppearance::Opaque
+    }
+
+    fn update_transparency(&mut self) {
+        let is_transparent = self.is_transparent();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.update_transparency(is_transparent);
+        }
+    }
+
+    fn is_maximized(&self) -> bool {
+        // A maximized window that gets minimized will still retain its maximized state.
+        !self.hidden && self.maximized_vertical && self.maximized_horizontal
     }
 }
 
@@ -828,7 +1318,17 @@ impl X11WindowState {
                 visual_id: visual.id,
                 bounds: bounds.to_pixels(scale_factor),
                 scale_factor,
-                renderer,
+                renderer: Some(renderer),
+                composition: Rc::new(RefCell::new(X11Composition {
+                    xcb: xcb.clone(),
+                    x_window,
+                    depth: visual.depth,
+                    visual_id: visual.id,
+                    base_surface: None,
+                    native_surfaces: Vec::new(),
+                    order: Vec::new(),
+                    occluders: FxHashMap::default(),
+                })),
                 atoms: *atoms,
                 input_handler: None,
                 active: false,
@@ -843,7 +1343,6 @@ impl X11WindowState {
                 appearance,
                 handle,
                 background_appearance: WindowBackgroundAppearance::Opaque,
-                destroyed: false,
                 client_side_decorations_supported,
                 decorations: WindowDecorations::Server,
                 last_insets: [0, 0, 0, 0],
@@ -880,9 +1379,12 @@ impl Drop for X11Window {
             parent.state.borrow_mut().children.remove(&self.0.x_window);
         }
 
-        state.renderer.destroy();
+        state.composition.borrow_mut().destroy();
+        // The renderer's GPU objects use the X connection, and a display mode switch closes the
+        // connection once no window is left in the client's window map, so both go now.
+        state.renderer.take();
 
-        let destroy_x_window = maybe!({
+        maybe!({
             check_reply(
                 || "X11 DestroyWindow failure.",
                 self.0.xcb.destroy_window(self.0.x_window),
@@ -892,22 +1394,13 @@ impl Drop for X11Window {
             anyhow::Ok(())
         })
         .log_err();
-
-        if destroy_x_window.is_some() {
-            state.destroyed = true;
-
-            let this_ptr = self.0.clone();
-            let client_ptr = state.client.clone();
-            state
-                .executor
-                .spawn(async move {
-                    this_ptr.close();
-                    client_ptr.drop_window(this_ptr.x_window);
-                })
-                .detach();
-        }
-
+        let client = state.client.clone();
+        let executor = state.executor.clone();
         drop(state);
+
+        client.drop_window(self.0.x_window);
+        let this_ptr = self.0.clone();
+        executor.spawn(async move { this_ptr.close() }).detach();
     }
 }
 
@@ -1063,7 +1556,11 @@ impl X11WindowStatePtr {
     pub fn property_notify(&self, event: xproto::PropertyNotifyEvent) -> anyhow::Result<()> {
         let state = self.state.borrow_mut();
         if event.atom == state.atoms._NET_WM_STATE {
+            let was_fullscreen = state.fullscreen;
             self.set_wm_properties(state)?;
+            if self.state.borrow().fullscreen != was_fullscreen {
+                self.notify_resize();
+            }
         } else if event.atom == state.atoms._GTK_EDGE_CONSTRAINTS {
             self.set_edge_constraints(state)?;
         }
@@ -1121,6 +1618,7 @@ impl X11WindowStatePtr {
             .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
 
         let was_active = state.active;
+        let was_maximized = state.maximized_vertical && state.maximized_horizontal;
         state.active = false;
         state.fullscreen = false;
         state.maximized_vertical = false;
@@ -1145,6 +1643,19 @@ impl X11WindowStatePtr {
         // the client, and focus is the conventional means for the user to zero it.
         if state.active && !was_active {
             set_wm_hints_urgency(&self.xcb, self.x_window, false);
+        }
+
+        // Maximized changes without a geometry change get no ConfigureNotify, so report them as a move.
+        // This ignores `hidden`, since minimizing shouldn't notify bounds observers.
+        let maximized_changed =
+            (state.maximized_vertical && state.maximized_horizontal) != was_maximized;
+        drop(state);
+        if maximized_changed {
+            let callback = self.callbacks.borrow_mut().moved.take();
+            if let Some(mut fun) = callback {
+                fun();
+                self.callbacks.borrow_mut().moved = Some(fun);
+            }
         }
 
         Ok(())
@@ -1307,7 +1818,9 @@ impl X11WindowStatePtr {
             }
 
             let gpu_size = query_render_extent(&self.xcb, self.x_window)?;
-            state.renderer.update_drawable_size(gpu_size);
+            if let Some(renderer) = &mut state.renderer {
+                renderer.update_drawable_size(gpu_size);
+            }
             let result = (is_resize, state.content_size(), state.scale_factor);
             if let Some(value) = state.last_sync_counter.take() {
                 check_reply(
@@ -1328,6 +1841,18 @@ impl X11WindowStatePtr {
         }
 
         Ok(())
+    }
+
+    fn notify_resize(&self) {
+        let (content_size, scale_factor) = {
+            let state = self.state.borrow();
+            (state.content_size(), state.scale_factor)
+        };
+        let callback = self.callbacks.borrow_mut().resize.take();
+        if let Some(mut fun) = callback {
+            fun(content_size, scale_factor);
+            self.callbacks.borrow_mut().resize = Some(fun);
+        }
     }
 
     pub fn set_active(&self, focus: bool) {
@@ -1363,8 +1888,7 @@ impl X11WindowStatePtr {
     pub fn set_appearance(&mut self, appearance: WindowAppearance) {
         let mut state = self.state.borrow_mut();
         state.appearance = appearance;
-        let is_transparent = state.is_transparent();
-        state.renderer.update_transparency(is_transparent);
+        state.update_transparency();
         state.appearance = appearance;
         drop(state);
         let callback = self.callbacks.borrow_mut().appearance_changed.take();
@@ -1389,10 +1913,7 @@ impl PlatformWindow for X11Window {
     }
 
     fn is_maximized(&self) -> bool {
-        let state = self.0.state.borrow();
-
-        // A maximized window that gets minimized will still retain its maximized state.
-        !state.hidden && state.maximized_vertical && state.maximized_horizontal
+        self.0.state.borrow().is_maximized()
     }
 
     fn window_bounds(&self) -> WindowBounds {
@@ -1624,8 +2145,7 @@ impl PlatformWindow for X11Window {
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.0.state.borrow_mut();
         state.background_appearance = background_appearance;
-        let transparent = state.is_transparent();
-        state.renderer.update_transparency(transparent);
+        state.update_transparency();
     }
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
@@ -1725,6 +2245,10 @@ impl PlatformWindow for X11Window {
         self.0.callbacks.borrow_mut().moved = Some(callback);
     }
 
+    // A GPUI display on X11 is an X screen, which spans every monitor, and a
+    // window never changes screen.
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.callbacks.borrow_mut().should_close = Some(callback);
     }
@@ -1746,8 +2270,12 @@ impl PlatformWindow for X11Window {
 
     fn draw(&self, scene: &Scene) {
         let mut inner = self.0.state.borrow_mut();
+        let inner = &mut *inner;
+        let Some(renderer) = &mut inner.renderer else {
+            return;
+        };
 
-        if inner.renderer.device_lost() {
+        if renderer.device_lost() {
             let raw_window = RawWindow {
                 connection: as_raw_xcb_connection::AsRawXcbConnection::as_raw_xcb_connection(
                     &*self.0.xcb,
@@ -1756,7 +2284,7 @@ impl PlatformWindow for X11Window {
                 window_id: self.0.x_window,
                 visual_id: inner.visual_id,
             };
-            match inner.renderer.recover(&raw_window) {
+            match renderer.recover(&raw_window) {
                 Ok(()) => {}
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
@@ -1767,16 +2295,114 @@ impl PlatformWindow for X11Window {
             return;
         }
 
-        inner.renderer.draw(scene);
+        renderer.draw(scene);
 
-        if inner.renderer.needs_redraw() {
+        if renderer.needs_redraw() {
             inner.force_render_after_recovery = true;
         }
     }
 
+    fn draw_composed(&self, scene: ComposedScene<'_>) {
+        let composition = self.0.state.borrow().composition.clone();
+        let mut composition = composition.borrow_mut();
+        let Some(base_surface) = composition.base_surface else {
+            drop(composition);
+            self.draw(scene.scene());
+            return;
+        };
+
+        // Every GPUI surface is drawn into the window in composition order, so
+        // later surfaces paint over earlier ones as they would when stacked.
+        let track_occluders = composition
+            .native_surfaces
+            .iter()
+            .any(|surface| surface.strong_count() > 0);
+        let mut window_scene = Scene::default();
+        let mut occluders = FxHashMap::default();
+        for layer in scene.layers() {
+            let mut layer_scene = Scene::default();
+            for range in &layer.ranges {
+                let replayed = window_scene
+                    .replay_balanced(range.clone(), scene.scene())
+                    .and_then(|()| {
+                        if track_occluders && layer.surface != base_surface {
+                            layer_scene.replay_balanced(range.clone(), scene.scene())
+                        } else {
+                            Ok(())
+                        }
+                    });
+                if let Err(error) = replayed {
+                    log::error!("replaying X11 composition scene: {error:#}");
+                    return;
+                }
+            }
+            if track_occluders && layer.surface != base_surface {
+                layer_scene.finish();
+                occluders.insert(layer.surface, scene_occluders(&layer_scene));
+            }
+        }
+        window_scene.finish();
+
+        if occluders != composition.occluders {
+            composition.occluders = occluders;
+            composition.apply_order().log_err();
+        }
+        drop(composition);
+        self.draw(&window_scene);
+    }
+
+    fn enable_window_composition(&self) -> anyhow::Result<()> {
+        let shape = self
+            .0
+            .xcb
+            .extension_information(shape::X11_EXTENSION_NAME)
+            .context("X11 QueryExtension for SHAPE failed")?;
+        anyhow::ensure!(
+            shape.is_some(),
+            "the X11 server does not support the SHAPE extension"
+        );
+        Ok(())
+    }
+
+    fn create_native_surface(&self) -> anyhow::Result<Rc<dyn PlatformSurfaceAttachment>> {
+        self.enable_window_composition()?;
+        let composition = self.0.state.borrow().composition.clone();
+        let mut composition = composition.borrow_mut();
+        let state = composition.create_native_surface()?;
+        Ok(Rc::new(X11NativeSurface {
+            state,
+            visual_id: composition.visual_id,
+        }))
+    }
+
+    fn set_composition_order(&self, surfaces: &[PlatformCompositionSurface]) -> anyhow::Result<()> {
+        let base_surface = surfaces
+            .iter()
+            .find_map(|surface| match surface.content {
+                PlatformCompositionSurfaceContent::Gpui => Some(surface.id),
+                PlatformCompositionSurfaceContent::Native(_)
+                | PlatformCompositionSurfaceContent::ExternalGpu(_) => None,
+            })
+            .context("composition has no GPUI base surface")?;
+        let composition = self.0.state.borrow().composition.clone();
+        let mut composition = composition.borrow_mut();
+        composition.base_surface = Some(base_surface);
+        composition.order = surfaces.to_vec();
+        composition
+            .occluders
+            .retain(|id, _| surfaces.iter().any(|surface| surface.id == *id));
+        composition.apply_order()
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let inner = self.0.state.borrow();
-        inner.renderer.sprite_atlas().clone()
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .as_ref()
+            .expect("the renderer is only taken when the window is dropped")
+            .sprite_atlas()
+            .clone()
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {
@@ -1940,13 +2566,11 @@ impl PlatformWindow for X11Window {
         match decorations {
             WindowDecorations::Server => {
                 state.decorations = WindowDecorations::Server;
-                let is_transparent = state.is_transparent();
-                state.renderer.update_transparency(is_transparent);
+                state.update_transparency();
             }
             WindowDecorations::Client => {
                 state.decorations = WindowDecorations::Client;
-                let is_transparent = state.is_transparent();
-                state.renderer.update_transparency(is_transparent);
+                state.update_transparency();
             }
         }
 
@@ -1965,7 +2589,7 @@ impl PlatformWindow for X11Window {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.0.state.borrow().renderer.gpu_specs().into()
+        self.0.state.borrow().renderer.as_ref()?.gpu_specs()
     }
 
     fn play_system_bell(&self) {
@@ -2051,5 +2675,92 @@ struct TrivialDeactivationHandler {
 impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
     fn deactivate_accessibility(&mut self) {
         (self.callback)();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{ContentMask, PaintedPath, PathBuilder, Quad, Shadow, black, point, size};
+
+    fn quad(bounds: Bounds<ScaledPixels>, mask: Bounds<ScaledPixels>) -> Quad {
+        Quad {
+            bounds,
+            content_mask: ContentMask { bounds: mask },
+            ..Default::default()
+        }
+    }
+
+    fn scaled(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
+        Bounds::new(
+            point(ScaledPixels(x), ScaledPixels(y)),
+            size(ScaledPixels(width), ScaledPixels(height)),
+        )
+    }
+
+    fn device(x: i32, y: i32, width: i32, height: i32) -> Bounds<DevicePixels> {
+        Bounds::new(
+            point(DevicePixels(x), DevicePixels(y)),
+            size(DevicePixels(width), DevicePixels(height)),
+        )
+    }
+
+    #[test]
+    fn scene_occluders_skip_shadows_and_covered_rectangles() {
+        let everything = scaled(0., 0., 1000., 1000.);
+        let mut scene = Scene::default();
+        scene.insert_primitive(Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(24.),
+            bounds: scaled(500., 500., 100., 100.),
+            corner_radii: Default::default(),
+            content_mask: ContentMask { bounds: everything },
+            color: Default::default(),
+            shape_bounds: scaled(500., 500., 100., 100.),
+            shape_corner_radii: Default::default(),
+            inset: false.into(),
+            pad: 0,
+        });
+        scene.insert_primitive(quad(scaled(10., 10., 100., 50.), everything));
+        scene.insert_primitive(quad(scaled(20.5, 20.5, 10., 10.), everything));
+        scene.insert_primitive(quad(
+            scaled(200., 0., 100., 100.),
+            scaled(250., 0., 20., 40.),
+        ));
+        scene.finish();
+
+        let mut occluders = scene_occluders(&scene);
+        occluders.sort_by_key(|bounds| bounds.origin.x);
+        assert_eq!(occluders, [device(10, 10, 100, 50), device(250, 0, 20, 40)]);
+    }
+
+    #[test]
+    fn scene_occluders_cover_painted_paths() {
+        let mut builder = PathBuilder::fill();
+        builder.move_to(point(px(10.), px(20.)));
+        builder.line_to(point(px(60.), px(20.)));
+        builder.line_to(point(px(60.), px(50.)));
+        builder.close();
+        let path = builder.build().expect("building a triangle path");
+        let mut scene = Scene::default();
+        scene.insert_primitive(PaintedPath::new(
+            path,
+            1.,
+            ContentMask {
+                bounds: Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(1000.))),
+            },
+            black().into(),
+        ));
+        scene.finish();
+
+        let occluders = scene_occluders(&scene);
+        let [occluder] = occluders.as_slice() else {
+            panic!("expected the path to occlude one rectangle");
+        };
+        assert!(occluder.origin.x <= DevicePixels(10) && occluder.origin.y <= DevicePixels(20));
+        assert!(
+            occluder.bottom_right().x >= DevicePixels(60)
+                && occluder.bottom_right().y >= DevicePixels(50)
+        );
     }
 }
