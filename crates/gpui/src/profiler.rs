@@ -797,6 +797,14 @@ pub struct FrameTiming {
     pub draw_start: Instant,
     /// When `Window::draw` finished.
     pub draw_end: Instant,
+    /// Time spent building, laying out, and prepainting root elements.
+    pub prepaint_duration: Duration,
+    /// Time spent requesting layout for the root element tree.
+    pub request_layout_duration: Duration,
+    /// Time spent computing root layout bounds.
+    pub layout_duration: Duration,
+    /// Time spent painting root elements into the scene.
+    pub paint_duration: Duration,
 }
 
 #[cfg(feature = "profiler")]
@@ -1033,6 +1041,19 @@ impl WindowProfiler {
 
     /// Records the end of a window draw and returns the draw duration.
     pub fn end_draw(&mut self, dirty_at: Option<Instant>, invalidations: u64) -> Duration {
+        self.end_draw_with_phases(
+            dirty_at,
+            invalidations,
+            crate::window::DrawPhaseTimings::default(),
+        )
+    }
+
+    pub(crate) fn end_draw_with_phases(
+        &mut self,
+        dirty_at: Option<Instant>,
+        invalidations: u64,
+        phase_timings: crate::window::DrawPhaseTimings,
+    ) -> Duration {
         let Some(WindowActivity::Draw {
             started_at: draw_start,
         }) = self.active_activities.pop()
@@ -1049,6 +1070,10 @@ impl WindowProfiler {
             invalidations,
             draw_start,
             draw_end,
+            prepaint_duration: phase_timings.prepaint,
+            request_layout_duration: phase_timings.request_layout,
+            layout_duration: phase_timings.layout,
+            paint_duration: phase_timings.paint,
         };
         let draw_duration = frame_timing.draw_duration();
         if !journal::power_interrupted_since(draw_start) {
@@ -1639,6 +1664,10 @@ mod tests {
             invalidations: 1,
             draw_start: draw_end - Duration::from_millis(2),
             draw_end,
+            prepaint_duration: Duration::ZERO,
+            request_layout_duration: Duration::ZERO,
+            layout_duration: Duration::ZERO,
+            paint_duration: Duration::ZERO,
         });
     }
 }

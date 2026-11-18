@@ -1341,6 +1341,10 @@ mod tests {
             invalidations: 1,
             draw_start: start + Duration::from_millis(3),
             draw_end: start + Duration::from_millis(4),
+            prepaint_duration: Duration::ZERO,
+            request_layout_duration: Duration::ZERO,
+            layout_duration: Duration::ZERO,
+            paint_duration: Duration::ZERO,
         };
         let presentation = PresentTiming {
             window_id: frame.window_id,
@@ -2967,6 +2971,10 @@ mod tests {
             invalidations: 1,
             draw_start: draw_end,
             draw_end,
+            prepaint_duration: Duration::ZERO,
+            request_layout_duration: Duration::ZERO,
+            layout_duration: Duration::ZERO,
+            paint_duration: Duration::ZERO,
         }
     }
 

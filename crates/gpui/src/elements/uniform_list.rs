@@ -132,6 +132,10 @@ pub struct ItemSize {
 }
 
 impl UniformListScrollHandle {
+    fn invalidate_view(&self) {
+        self.0.borrow().base_handle.invalidate_view();
+    }
+
     /// Create a new scroll handle to bind to a uniform list.
     pub fn new() -> Self {
         Self(Rc::new(RefCell::new(UniformListScrollState {
@@ -154,6 +158,7 @@ impl UniformListScrollHandle {
             offset: 0,
             scroll_strict: false,
         });
+        self.invalidate_view();
     }
 
     /// Scroll the list so that the given item index is at scroll strategy position.
@@ -167,6 +172,7 @@ impl UniformListScrollHandle {
             offset: 0,
             scroll_strict: true,
         });
+        self.invalidate_view();
     }
 
     /// Scroll the list to the given item index with an offset in number of items.
@@ -186,6 +192,7 @@ impl UniformListScrollHandle {
             offset,
             scroll_strict: false,
         });
+        self.invalidate_view();
     }
 
     /// Scroll the list so that the given item index is at the exact scroll strategy position with an offset.
@@ -210,6 +217,7 @@ impl UniformListScrollHandle {
             offset,
             scroll_strict: true,
         });
+        self.invalidate_view();
     }
 
     /// Check if the list is flipped vertically.

@@ -561,6 +561,10 @@ mod tests {
             invalidations: 3,
             draw_start: at(350),
             draw_end: at(380),
+            prepaint_duration: Duration::ZERO,
+            request_layout_duration: Duration::ZERO,
+            layout_duration: Duration::ZERO,
+            paint_duration: Duration::ZERO,
         };
         let snapshot = FrameSnapshot {
             interval_start: at(150),
@@ -769,6 +773,10 @@ mod tests {
                     invalidations: 1,
                     draw_start: at(140),
                     draw_end: at(145),
+                    prepaint_duration: Duration::ZERO,
+                    request_layout_duration: Duration::ZERO,
+                    layout_duration: Duration::ZERO,
+                    paint_duration: Duration::ZERO,
                 },
                 presentation: PresentTiming {
                     window_id,
@@ -855,6 +863,10 @@ mod tests {
                     invalidations: 1,
                     draw_start: at(145),
                     draw_end: at(147),
+                    prepaint_duration: Duration::ZERO,
+                    request_layout_duration: Duration::ZERO,
+                    layout_duration: Duration::ZERO,
+                    paint_duration: Duration::ZERO,
                 },
                 presentation: PresentTiming {
                     window_id,
@@ -926,6 +938,10 @@ mod tests {
                     invalidations: 1,
                     draw_start: at(1),
                     draw_end: at(39),
+                    prepaint_duration: Duration::ZERO,
+                    request_layout_duration: Duration::ZERO,
+                    layout_duration: Duration::ZERO,
+                    paint_duration: Duration::ZERO,
                 }),
             ],
             small_polls: Vec::new(),
@@ -969,6 +985,10 @@ mod tests {
                     invalidations: 1,
                     draw_start: at(148),
                     draw_end: at(149),
+                    prepaint_duration: Duration::ZERO,
+                    request_layout_duration: Duration::ZERO,
+                    layout_duration: Duration::ZERO,
+                    paint_duration: Duration::ZERO,
                 },
                 presentation: PresentTiming {
                     window_id,
@@ -1299,6 +1319,10 @@ mod tests {
             invalidations: 1,
             draw_start: draw_end - Duration::from_millis(1),
             draw_end,
+            prepaint_duration: Duration::ZERO,
+            request_layout_duration: Duration::ZERO,
+            layout_duration: Duration::ZERO,
+            paint_duration: Duration::ZERO,
         }
     }
 }

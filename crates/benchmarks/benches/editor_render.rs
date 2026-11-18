@@ -4,9 +4,11 @@ use benchmarks::bench_utils::random_rust_file;
 use editor::{
     Editor, EditorMode, MultiBuffer,
     actions::{DeleteToPreviousWordStart, SelectAll, SplitSelectionIntoLines},
+    scroll::ScrollAmount,
 };
 use gpui::{
-    App, AppContext as _, BenchAppContext, BorrowAppContext as _, Focusable as _, UpdateGlobal as _,
+    App, AppContext as _, BenchAppContext, BorrowAppContext as _, Context, Entity, Focusable as _,
+    IntoElement, Render, SharedString, UpdateGlobal as _, Window, div, prelude::*, px,
 };
 use indoc::{formatdoc, indoc};
 use language::{Buffer, Capability, DiskState, File, LocalFile, Rope};
@@ -430,6 +432,136 @@ fn render_highlighted_editor(cx: &mut BenchAppContext) {
     });
 }
 
+#[gpui::bench]
+fn editor_noop_notify(cx: &mut BenchAppContext) {
+    benchmark_editor_update(EditorUpdate::Notify, cx);
+}
+
+#[gpui::bench]
+fn editor_cursor_blink(cx: &mut BenchAppContext) {
+    benchmark_editor_update(EditorUpdate::CursorBlink, cx);
+}
+
+#[gpui::bench]
+fn editor_scroll(cx: &mut BenchAppContext) {
+    benchmark_editor_update(EditorUpdate::Scroll, cx);
+}
+
+#[derive(Clone, Copy)]
+enum EditorUpdate {
+    Notify,
+    CursorBlink,
+    Scroll,
+}
+
+fn benchmark_editor_update(update: EditorUpdate, cx: &mut BenchAppContext) {
+    init_context(cx);
+
+    let text = "fn main() { println!(\"hello\"); }\n".repeat(1_000);
+    let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
+
+    let mut window = cx.add_empty_window();
+    let editor = window.update(|window, cx| {
+        let editor = window.replace_root(cx, |window, cx| {
+            let mut editor = Editor::new(EditorMode::full(), buffer, None, window, cx);
+            editor.set_style(editor::EditorStyle::default(), window, cx);
+            editor
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+        editor
+    });
+
+    let mut scroll_amount = 1.;
+    cx.bench_renderer(editor, move |editor, window, cx| match update {
+        EditorUpdate::Notify => cx.notify(),
+        EditorUpdate::CursorBlink => editor.toggle_cursor_visibility(cx),
+        EditorUpdate::Scroll => {
+            editor.scroll_screen(&ScrollAmount::Line(scroll_amount), window, cx);
+            scroll_amount = -scroll_amount;
+        }
+    });
+}
+
+#[gpui::bench]
+fn editor_noop_notify_with_static_sibling(cx: &mut BenchAppContext) {
+    benchmark_editor_with_static_sibling(false, cx);
+}
+
+#[gpui::bench]
+fn editor_scroll_with_static_sibling(cx: &mut BenchAppContext) {
+    benchmark_editor_with_static_sibling(true, cx);
+}
+
+fn benchmark_editor_with_static_sibling(scroll_editor: bool, cx: &mut BenchAppContext) {
+    init_context(cx);
+
+    let text = "fn main() { println!(\"hello\"); }\n".repeat(1_000);
+    let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
+    let rows = (0..1_000)
+        .map(|row| SharedString::from(format!("Static row {row}")))
+        .collect();
+
+    let mut window = cx.add_empty_window();
+    let editor = window.update(|window, cx| {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::new(EditorMode::full(), buffer, None, window, cx);
+            editor.set_style(editor::EditorStyle::default(), window, cx);
+            editor
+        });
+        let static_sibling = cx.new(|_| StaticRows { rows });
+        window.replace_root(cx, |_, _| EditorWithStaticSibling {
+            editor: editor.clone(),
+            static_sibling,
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+        editor
+    });
+
+    if scroll_editor {
+        let mut amount = 1.;
+        cx.bench_renderer(editor, move |editor, window, cx| {
+            editor.scroll_screen(&ScrollAmount::Line(amount), window, cx);
+            amount = -amount;
+        });
+    } else {
+        cx.bench_renderer(editor, |_editor, _window, cx| cx.notify());
+    }
+}
+
+struct EditorWithStaticSibling {
+    editor: Entity<Editor>,
+    static_sibling: Entity<StaticRows>,
+}
+
+impl Render for EditorWithStaticSibling {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .child(div().flex_1().h_full().child(self.editor.clone()))
+            .child(
+                div()
+                    .w(px(400.))
+                    .h_full()
+                    .child(self.static_sibling.clone()),
+            )
+    }
+}
+
+struct StaticRows {
+    rows: Vec<SharedString>,
+}
+
+impl Render for StaticRows {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().flex_col().children(
+            self.rows
+                .iter()
+                .map(|row| div().h(px(20.)).child(row.clone())),
+        )
+    }
+}
+
 fn init_context(cx: &mut BenchAppContext) {
     cx.update(|cx| {
         let store = SettingsStore::test(cx);
@@ -455,6 +587,11 @@ gpui::bench_group!(
     editor_render,
     editor_render_with_editorconfig,
     editor_render_highlighted,
-    editor_render_highlighted_minimap
+    editor_render_highlighted_minimap,
+    editor_noop_notify,
+    editor_cursor_blink,
+    editor_scroll,
+    editor_noop_notify_with_static_sibling,
+    editor_scroll_with_static_sibling
 );
 gpui::bench_main!(benches);

@@ -53,7 +53,7 @@ use std::{
     marker::PhantomData,
     mem,
     ops::{DerefMut, Range},
-    rc::Rc,
+    rc::{Rc, Weak as RcWeak},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
@@ -147,6 +147,48 @@ pub(crate) struct WindowInvalidator {
     inner: Rc<RefCell<WindowInvalidatorInner>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ViewInvalidator {
+    window: RcWeak<RefCell<WindowInvalidatorInner>>,
+    entity: EntityId,
+}
+
+impl Debug for ViewInvalidator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ViewInvalidator")
+            .field("entity", &self.entity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ViewInvalidator {
+    pub(crate) fn invalidate(&self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let mut window = window.borrow_mut();
+        // Mutations made while building the current frame are already reflected in it.
+        // Carrying them forward would keep handles configured during render perpetually dirty.
+        if window.draw_phase != DrawPhase::None {
+            return;
+        }
+        window.update_count += 1;
+        window.dirty_views.insert(self.entity);
+        #[cfg(feature = "profiler")]
+        let dirty_at = WindowInvalidator::record_frame_dirty(&mut window);
+        #[cfg(feature = "profiler")]
+        let became_dirty = !window.dirty;
+        window.dirty = true;
+        #[cfg(feature = "profiler")]
+        if became_dirty {
+            let window_id = window.window_id;
+            drop(window);
+            profiler::journal::record_frame_pending(window_id, dirty_at);
+        }
+    }
+}
+
 impl WindowInvalidator {
     pub fn new(#[allow(unused_variables)] window_id: WindowId) -> Self {
         WindowInvalidator {
@@ -188,6 +230,13 @@ impl WindowInvalidator {
             true
         } else {
             false
+        }
+    }
+
+    fn view_invalidator(&self, entity: EntityId) -> ViewInvalidator {
+        ViewInvalidator {
+            window: Rc::downgrade(&self.inner),
+            entity,
         }
     }
 
@@ -1302,6 +1351,15 @@ pub(crate) enum DrawPhase {
     Prepaint,
     Paint,
     Focus,
+}
+
+#[cfg_attr(not(feature = "profiler"), allow(dead_code))]
+#[derive(Default)]
+pub(crate) struct DrawPhaseTimings {
+    pub(crate) prepaint: Duration,
+    pub(crate) request_layout: Duration,
+    pub(crate) layout: Duration,
+    pub(crate) paint: Duration,
 }
 
 pub(crate) const PENDING_INPUT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -3300,8 +3358,9 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
-        if !cx.mode.skip_drawing() {
-            self.draw_roots(cx);
+        #[cfg_attr(not(feature = "profiler"), allow(unused_variables))]
+        let phase_timings = if !cx.mode.skip_drawing() {
+            let phase_timings = self.draw_roots(cx);
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -3312,7 +3371,10 @@ impl Window {
                     scale_factor,
                 );
             }
-        }
+            phase_timings
+        } else {
+            DrawPhaseTimings::default()
+        };
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
 
@@ -3407,9 +3469,11 @@ impl Window {
 
         #[cfg(feature = "profiler")]
         {
-            let draw_duration = self
-                .window_profiler
-                .end_draw(frame_dirty.dirty_at, frame_dirty.invalidations);
+            let draw_duration = self.window_profiler.end_draw_with_phases(
+                frame_dirty.dirty_at,
+                frame_dirty.invalidations,
+                phase_timings,
+            );
             self.debug_frame_overlay.record_frame(draw_duration);
         }
 
@@ -3432,7 +3496,7 @@ impl Window {
         mem::swap(&mut entities, entities_ref.deref_mut());
     }
 
-    fn invalidate_entities(&mut self) {
+    pub(crate) fn invalidate_entities(&mut self) {
         let mut views = self.invalidator.take_views();
         for entity in views.drain() {
             self.mark_view_dirty(entity);
@@ -3506,7 +3570,8 @@ impl Window {
         self.refresh();
     }
 
-    fn draw_roots(&mut self, cx: &mut App) {
+    fn draw_roots(&mut self, cx: &mut App) -> DrawPhaseTimings {
+        let prepaint_started_at = cfg!(feature = "profiler").then(Instant::now);
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
 
@@ -3543,7 +3608,10 @@ impl Window {
             .as_mut()
             .unwrap()
             .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
-        root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+        let layout_started_at = prepaint_started_at.map(|_| Instant::now());
+        root_element.layout_as_root(root_size.into(), self, cx);
+        let root_prepaint_started_at = layout_started_at.map(|_| Instant::now());
+        root_element.prepaint_at(Point::default(), self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
@@ -3574,6 +3642,7 @@ impl Window {
         }
 
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        let paint_started_at = prepaint_started_at.map(|_| Instant::now());
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
@@ -3620,6 +3689,26 @@ impl Window {
                 );
                 self.platform_window.a11y_tree_update(tree_update);
             }
+        }
+
+        match (
+            prepaint_started_at,
+            layout_started_at,
+            root_prepaint_started_at,
+            paint_started_at,
+        ) {
+            (
+                Some(prepaint_started_at),
+                Some(layout_started_at),
+                Some(root_prepaint_started_at),
+                Some(paint_started_at),
+            ) => DrawPhaseTimings {
+                prepaint: paint_started_at.duration_since(prepaint_started_at),
+                request_layout: layout_started_at.duration_since(prepaint_started_at),
+                layout: root_prepaint_started_at.duration_since(layout_started_at),
+                paint: Instant::now().duration_since(paint_started_at),
+            },
+            _ => DrawPhaseTimings::default(),
         }
     }
 
@@ -5049,6 +5138,21 @@ impl Window {
         )
     }
 
+    pub(crate) fn request_retained_layout(&mut self, style: taffy::Style) -> LayoutId {
+        self.invalidator.debug_assert_prepaint();
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .request_retained_layout(style)
+    }
+
+    pub(crate) fn retainable_layout_style(&self, layout_id: LayoutId) -> Option<taffy::Style> {
+        self.layout_engine
+            .as_ref()
+            .unwrap()
+            .retainable_style(layout_id)
+    }
+
     /// Add a node to the layout tree for the current frame. Instead of taking a `Style` and children,
     /// this variant takes a function that is invoked during layout so you can use arbitrary logic to
     /// determine the element's size. One place this is used internally is when measuring text.
@@ -5173,6 +5277,10 @@ impl Window {
     pub fn current_view(&self) -> EntityId {
         self.invalidator.debug_assert_paint_or_prepaint();
         self.rendered_entity_stack.last().copied().unwrap()
+    }
+
+    pub(crate) fn current_view_invalidator(&self) -> ViewInvalidator {
+        self.invalidator.view_invalidator(self.current_view())
     }
 
     #[inline]

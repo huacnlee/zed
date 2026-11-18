@@ -139,6 +139,22 @@ impl BenchReport {
                         .draw
                         .record(timing.draw_duration().as_nanos() as u64)
                         .ok();
+                    snapshot
+                        .prepaint
+                        .record(timing.prepaint_duration.as_nanos() as u64)
+                        .ok();
+                    snapshot
+                        .request_layout
+                        .record(timing.request_layout_duration.as_nanos() as u64)
+                        .ok();
+                    snapshot
+                        .layout
+                        .record(timing.layout_duration.as_nanos() as u64)
+                        .ok();
+                    snapshot
+                        .paint
+                        .record(timing.paint_duration.as_nanos() as u64)
+                        .ok();
                     if let Some(dirty_to_draw) = timing.dirty_to_draw_duration() {
                         snapshot
                             .dirty_to_draw
@@ -248,6 +264,10 @@ impl BenchReport {
         eprintln!("  note: includes Criterion warmup/calibration");
         self.print_histogram("window dirty-to-draw", &frame_snapshot.dirty_to_draw);
         self.print_histogram("window draw", &frame_snapshot.draw);
+        self.print_histogram("window prepaint", &frame_snapshot.prepaint);
+        self.print_histogram("window request layout", &frame_snapshot.request_layout);
+        self.print_histogram("window compute layout", &frame_snapshot.layout);
+        self.print_histogram("window paint", &frame_snapshot.paint);
         self.print_histogram("window present interval", &frame_snapshot.present_interval);
         if !frame_snapshot.invalidations_per_frame.is_empty() {
             eprintln!(
@@ -320,6 +340,10 @@ impl BenchReport {
 struct WindowFrameSnapshot {
     dirty_to_draw: Histogram<u64>,
     draw: Histogram<u64>,
+    prepaint: Histogram<u64>,
+    request_layout: Histogram<u64>,
+    layout: Histogram<u64>,
+    paint: Histogram<u64>,
     present_interval: Histogram<u64>,
     invalidations_per_frame: Histogram<u64>,
     foreground_work: DurationHistogram,
@@ -330,6 +354,10 @@ impl WindowFrameSnapshot {
         Self {
             dirty_to_draw: Histogram::new(3).expect("3 significant digits is valid"),
             draw: Histogram::new(3).expect("3 significant digits is valid"),
+            prepaint: Histogram::new(3).expect("3 significant digits is valid"),
+            request_layout: Histogram::new(3).expect("3 significant digits is valid"),
+            layout: Histogram::new(3).expect("3 significant digits is valid"),
+            paint: Histogram::new(3).expect("3 significant digits is valid"),
             present_interval: Histogram::new(3).expect("3 significant digits is valid"),
             invalidations_per_frame: Histogram::new(3).expect("3 significant digits is valid"),
             foreground_work: DurationHistogram::new(),
